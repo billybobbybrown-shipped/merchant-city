@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Merchant City — Asset Viewer</title>
+    <style>
+      * { margin: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #0b0e12; font-family: system-ui, sans-serif; }
+      #bar {
+        position: fixed; top: 10px; left: 10px; z-index: 5; color: #dfe5ea;
+        background: rgba(14,18,24,0.9); border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px; padding: 10px 14px; font-size: 13px; display: flex; gap: 14px; align-items: center;
+      }
+      input[type="range"] { width: 140px; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <strong>ASSET VIEWER</strong>
+      <label>time of day <input id="tod" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
+      <span>drag — orbit · scroll — zoom</span>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
