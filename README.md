@@ -61,6 +61,16 @@ Supabase and set `SUPABASE_JWT_SECRET` / `VITE_SUPABASE_URL` /
 
 ## Working on it together
 
-Migrations are numbered (`db/044_appearance.sql`) and applied in order at boot.
-**Claim a number range before you start** so we don't both write `045_`. Never
-edit a migration that has already been applied — add a new one.
+Create migrations with:
+
+```bash
+npm run migration:new -- add gold refinery
+```
+
+That writes `db/20260816153000_add_gold_refinery.sql`. The timestamp is unique
+per author, so we can both write one at the same time without coordinating, and
+they still apply in the order they were written. The server refuses to boot if
+two migrations ever share a number, rather than applying them in an order that
+depends on the rest of the filename.
+
+Never edit a migration that has already been applied — add a new one.

@@ -50,6 +50,23 @@ export async function migrate(): Promise<void> {
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
       .sort();
+    // Two migrations sharing a prefix means two people picked the same slot and
+    // the order they apply in is down to the rest of the filename — exactly the
+    // ambiguity that corrupts one person's schema and not the other's. Refuse to
+    // boot rather than apply them and hope. `npm run migration:new` avoids it.
+    const byPrefix = new Map<string, string[]>();
+    for (const f of files) {
+      const prefix = f.match(/^(\d+)/)?.[1];
+      if (!prefix) continue;
+      byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), f]);
+    }
+    const clashes = [...byPrefix.values()].filter((g) => g.length > 1);
+    if (clashes.length)
+      throw new Error(
+        `migrations share a number — rename one with a timestamp prefix (npm run migration:new):\n  ${clashes
+          .map((g) => g.join("  vs  "))
+          .join("\n  ")}`
+      );
     for (const file of files) {
       const { rowCount } = await client.query(
         "select 1 from schema_migrations where name = $1",

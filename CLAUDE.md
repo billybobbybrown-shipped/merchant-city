@@ -51,9 +51,11 @@ economies. Config lives in `server/.env` (copy `server/.env.example`).
 - **Game rules live in `shared/`.** Items, recipes, prices, appearance catalogs.
   If the client and server could ever disagree about a rule, the rule is in the
   wrong place.
-- **Migrations are numbered and idempotent** (`db/044_appearance.sql`). They run
-  in order at boot and must be safe to re-run. Never edit one that has shipped —
-  add another.
+- **Migrations are timestamped and idempotent.** Create them with
+  `npm run migration:new -- what it does`; never hand-name one with the next
+  number. They run in filename order at boot, exactly once, and must be safe to
+  re-run. Never edit one that has shipped — add another. The server refuses to
+  start if two migrations share a numeric prefix.
 - **Avatars are one draw call.** `client/src/assets/avatar.ts` merges every body
   part into a single skinned geometry with colours baked into vertex colours.
   Adding detail costs triangles, not draw calls. Keep it that way.
@@ -100,7 +102,5 @@ and the database.
 
 ## Working together
 
-- **Claim a migration number range** before adding migrations, or use a
-  timestamp prefix. Two people both grabbing `045_` is the obvious collision.
 - Keep `PROGRESS.md` up to date — it is the change log and the shared memory of
   why things are the way they are.
