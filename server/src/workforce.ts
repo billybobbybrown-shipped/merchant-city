@@ -57,12 +57,8 @@ export class WorkforceStore {
     if (!Number.isInteger(slots) || slots < 1 || slots > 20) throw new EconomyError("bad slots");
     if (assignRole !== null && !JOB_ROLES.includes(assignRole as JobRole))
       throw new EconomyError("unknown role");
-    if (assignLot !== null) {
-      const controllable = [...this.acting(actor)].some(
-        (e) => this.lots.ownsLot(e, assignLot) || this.lots.isTenant(e, assignLot)
-      );
-      if (!controllable) throw new EconomyError("that lot isn't yours to staff");
-    }
+    if (assignLot !== null && this.lots.operatorOf(assignLot) !== employer)
+      throw new EconomyError("that lot isn't on this employer's books");
     await pool.query(
       `insert into hire_offers (world_id, employer_entity, wage, slots, assign_lot, assign_role)
        values ($1,$2,$3,$4,$5,$6)`,
@@ -207,10 +203,12 @@ export class WorkforceStore {
     }
 
     if (lotId === null) throw new EconomyError("pick a property for this job");
-    const controllable = [...this.acting(actor)].some(
-      (e) => this.lots.ownsLot(e, lotId) || this.lots.isTenant(e, lotId)
-    );
-    if (!controllable) throw new EconomyError("that lot isn't yours to staff");
+    // The lot has to be on the EMPLOYER's own books — a company's staff work
+    // company property, your staff work yours. ownsLot can't say that: it runs
+    // through the control resolver, which expands you to every company you
+    // control. operatorOf answers for the lot itself (tenant, else owner).
+    if (this.lots.operatorOf(lotId) !== employer)
+      throw new EconomyError("that lot isn't on this employer's books");
     const st = this.lots.get(lotId);
     if (!st?.building && !st?.source && this.lots.buildingDef(lotId) === null)
       throw new EconomyError("nothing there to work");
@@ -307,21 +305,21 @@ export class WorkforceStore {
 
   // NPC-employer convenience: make sure (lot, role) is covered by a worker or
   // an open preset offer — entrepreneurs and companies staff through this
-  async ensureStaffed(employer: number, lotId: number, role: JobRole, wage: number): Promise<void> {
+  async ensureStaffed(employer: number, lotId: number, role: JobRole, wage: number, count = 1): Promise<void> {
     const assigned = await pool.query(
-      "select 1 from npcs where employer_entity = $1 and employer_lot = $2 and job_role = $3 limit 1",
+      "select count(*) as n from npcs where employer_entity = $1 and employer_lot = $2 and job_role = $3",
       [employer, lotId, role]
     );
-    if (assigned.rowCount) return;
     const offered = await pool.query(
-      "select 1 from hire_offers where employer_entity = $1 and assign_lot = $2 and assign_role = $3 and slots > 0 limit 1",
+      "select coalesce(sum(slots), 0) as n from hire_offers where employer_entity = $1 and assign_lot = $2 and assign_role = $3",
       [employer, lotId, role]
     );
-    if (offered.rowCount) return;
+    const short = count - Number(assigned.rows[0].n) - Number(offered.rows[0].n);
+    if (short <= 0) return;
     await pool.query(
       `insert into hire_offers (world_id, employer_entity, wage, slots, assign_lot, assign_role)
-       values ($1,$2,$3,1,$4,$5)`,
-      [WORLD_ID, employer, wage, lotId, role]
+       values ($1,$2,$3,$4,$5,$6)`,
+      [WORLD_ID, employer, wage, short, lotId, role]
     );
   }
 }

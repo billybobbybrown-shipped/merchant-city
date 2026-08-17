@@ -1011,3 +1011,51 @@ Memory, Cooling, each tab showing how many are fitted — so a full industrial
 rack reads as four short lists instead of sixteen rows in a heap. The install
 list stays one flat list of what you actually have, and the slot rules sit as
 subtext under the parts they describe.
+
+## Companies scale + market maker hygiene (Aug 17)
+
+**Companies grow when demand proves out.** A producer that keeps selling out
+(product gone from shelf AND store) while its craft queue is saturated buys
+another of its final-stage machine (cap 4), plus storage racks that grow more
+slowly. Everything keys off the machine count — craft batches multiply by it,
+the queue deepens with it (`3 × benches`), input bids scale to feed it, retail
+restocks keep pace — so the extra furniture is real capacity, not decoration.
+Staff follows: every producer hires a stocker, and each extra bench brings a
+crafter (`workforce.ensureStaffed` now takes a headcount and posts offers for
+the shortfall). Nordvik adds electronics benches when its queue saturates;
+HashWorks stands up another mining rack (cap 4) once every rig is fully built
+and cash covers it. Six ops days took Vesper to 4 benches, three companies to
+3 machines, all crafter offers filled.
+
+**Wide spreads on cheap stocks fixed.** Makers re-quote every 10s but the stale
+sweep cleared only 60 orders/tick — the backlog pushed holders into their
+20-order cap, so fresh asks were rejected and the ask side starved (Crestfield:
+29,776 shares bid vs 38 offered → 6.6% spreads). Three fixes in
+`marketMakers.ts`: every maker now cancels its own working quote per asset+side
+before placing a new one (`requote()` — cancel, not delete, so escrow comes
+home), the stale sweep clears up to 500/tick, and the city desk quotes BOTH
+sides — its standing bid as before, plus an ask recycling 25% of whatever
+inventory it bought (stocks and coin alike), so the desk self-funds instead of
+draining the treasury. Spreads now 0.1–1.2% across all ten stocks, book turns
+over inside the 2-minute TTL (~730 orders, oldest 2 min), treasury recovered
+$17k → $113k on desk sales.
+
+## Realistic dividends (Aug 17)
+
+Dividends were a daily lottery — 35% of one noisy 10-minute ledger window,
+which meant almost nobody ever paid (only Atlas, 15 times ever), and when it
+did fire it was an erratic lump. Rebuilt as a declared policy sized like real
+markets: `dividend_ratio` now means TARGET ANNUAL YIELD on the share price
+(income names run 1-7% — Atlas 4.5%, Bluebird Tobacco 6.5%, Nordvik 1%;
+growth names zero). Every 7th game day is pay day: `declaredDps()` (shared,
+tested) converts the target to a weekly per-share rate — 52 periods to a game
+year — smooths moves to ±25% per period like a sticky board policy, and caps
+the period pool at 5% of company cash so a payer can run for years off
+retained earnings but can't bleed dry. Stocks table carries `dps`, `last_pay`,
+`pay_day_counter`; two migrations (columns + re-rating the NPC names).
+
+UI: stock list and detail show the ANNUALIZED yield from the actual declared
+rate (`dps × 52 / price`), the weekly per-share amount, and days until the
+next payment; the company panel's dividend policy input is now "% / year"
+(0-10, step 0.5). Verified over a full period: all seven income names paid
+~80 holders each, measured yields 0.94-6.41% against targets of 1-6.5%.

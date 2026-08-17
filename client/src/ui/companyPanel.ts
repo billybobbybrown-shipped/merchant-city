@@ -222,11 +222,11 @@ export class CompanyPanel {
       if (amt() > 0) this.actions.moveCash(c.entityId, -amt());
     });
     host.querySelector(".cp-move-in")?.addEventListener("click", () => {
-      const lotId = Number(host.querySelector<HTMLSelectElement>(".cp-lot-in")?.value);
+      const lotId = Number(host.querySelector<HTMLSelectElement>("select.cp-lot-in")?.value);
       if (Number.isInteger(lotId)) this.actions.transferLot(c.entityId, lotId, true);
     });
     host.querySelector(".cp-move-out")?.addEventListener("click", () => {
-      const lotId = Number(host.querySelector<HTMLSelectElement>(".cp-lot-out")?.value);
+      const lotId = Number(host.querySelector<HTMLSelectElement>("select.cp-lot-out")?.value);
       if (Number.isInteger(lotId)) this.actions.transferLot(c.entityId, lotId, false);
     });
   }
@@ -315,14 +315,15 @@ export class CompanyPanel {
         <div class="cp-group">
           <div class="gd-cap">Dividend policy</div>
           <div class="lp-inline">
-            <input class="lp-input cp-divr" type="number" min="0" max="1" step="0.05" value="${stock.dividendRatio}" />
+            <input class="lp-input cp-divr" type="number" min="0" max="10" step="0.5" value="${Math.round(stock.dividendRatio * 1000) / 10}" />
+            <span class="mkt-dim">% / year</span>
             <button class="gd-btn cp-setdiv">Set payout</button>
           </div>
-          <div class="lp-hint">Share of each day's profit paid to shareholders from company cash. Zero makes it a growth company.</div>
+          <div class="lp-hint">Target annual yield on the share price, paid to shareholders weekly from company cash. Real income stocks run 1&#8211;7%; zero makes it a growth company.</div>
         </div>`;
       host.querySelector(".cp-setdiv")?.addEventListener("click", () => {
         const v = Number(host.querySelector<HTMLInputElement>(".cp-divr")?.value);
-        if (v >= 0 && v <= 1) this.actions.setDividend(c.entityId, v);
+        if (v >= 0 && v <= 10) this.actions.setDividend(c.entityId, v / 100);
       });
       return;
     }

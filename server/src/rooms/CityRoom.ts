@@ -136,6 +136,9 @@ export class CityRoom extends Room<CityState> {
       }
       st.x = n.x;
       st.y = n.y;
+      st.heading = n.heading ?? 999;
+      st.status = n.status ?? "";
+      st.employer = n.employerEntity === null ? "" : String(n.employerEntity);
     },
     remove: (eid: number) => {
       this.state.npcs.delete(String(eid));

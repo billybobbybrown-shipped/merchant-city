@@ -510,7 +510,7 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 
 /* ---------- company panel ---------- */
 .company-panel {
-  position: absolute; left: 12px; top: 64px; width: 320px;
+  position: absolute; left: 12px; top: 64px; width: 404px;
   padding: 12px 14px; font-size: 13px; max-height: 74vh; overflow-y: auto; z-index: 6;
 }
 .company-panel .lp-inline { display: flex; gap: 6px; margin: 6px 0; }
@@ -546,7 +546,7 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 
 /* ---------- economy dashboard ---------- */
 .economy-panel {
-  position: absolute; left: 12px; top: 64px; width: 350px;
+  position: absolute; left: 12px; top: 64px; width: 404px;
   padding: 12px 14px; font-size: 13px; max-height: 78vh; overflow-y: auto; z-index: 6;
 }
 .ec-bar { flex: 1; height: 7px; background: rgba(255,255,255,0.07); border-radius: 4px; overflow: hidden; }
@@ -662,13 +662,15 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 
 /* ---------- workers panel ---------- */
 .workers-panel {
-  position: absolute; left: 12px; top: 64px; width: 380px;
+  position: absolute; left: 12px; top: 64px; width: 404px;
   padding: 12px 14px; font-size: 13px; max-height: 76vh; overflow-y: auto; z-index: 6;
 }
 .wk-row { padding: 7px 8px; border-radius: 7px; background: rgba(255,255,255,0.03); margin-bottom: 6px; }
 .wk-line { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
 .wk-wage { opacity: 0.7; font-size: 12px; }
 .wk-job { margin-left: auto; font-size: 11.5px; color: #e8d8ae; opacity: 0.85; text-transform: capitalize; }
+.wk-line b { white-space: nowrap; }
+.wk-paused { color: var(--faint); }
 .wk-actions { display: flex; gap: 5px; }
 .wk-actions .lp-input { flex: 1; min-width: 0; font-size: 12px; padding: 3px 6px; }
 .wk-actions .gd-btn { flex: 0 0 auto; }
@@ -874,8 +876,9 @@ select.lp-input { cursor: pointer; }
 .fixture-panel .fx-body, .pocket-panel .inv-grid { padding: 12px var(--pad) var(--pad); }
 .pocket-panel { top: auto; bottom: 12px; width: 268px; padding: 0; }
 .pocket-panel .inv-capwrap { padding: 0 var(--pad) 12px; }
-.workers-panel, .company-panel, .economy-panel { top: 68px; padding: 0; }
-.workers-panel { width: 376px; }
+/* the three side panels are one family — same width, same anchor, so they
+   don't read as three different dialogs, and content stops truncating */
+.workers-panel, .company-panel, .economy-panel { top: 68px; width: 404px; padding: 0; }
 .legend-panel { top: 68px; }
 .hud-nav { gap: 4px; padding: 7px 10px; }
 .hud-sep { width: 1px; height: 16px; background: var(--line-hi); margin: 0 5px; flex: 0 0 auto; }
@@ -971,7 +974,6 @@ select.lp-input { cursor: pointer; }
    ========================================================================= */
 
 /* panels sized to their content */
-.company-panel { width: 372px; }
 
 /* tab strips stay on one line; scroll rather than wrap if a panel is narrow */
 .pg-nav { flex-wrap: wrap; }
@@ -1265,16 +1267,20 @@ select.lp-input { cursor: pointer; }
 .panel {
   overflow-x: hidden;
 }
+/* NOT .wk-actions or .dk-form: they host <select> dropdowns, and any overflow
+   value here forces overflow-y to clip too — which cages the pop-out menu
+   inside a row a fraction of its height. Their children carry min-width: 0, so
+   they cannot overflow sideways anyway. */
 .panel .fx-body,
 .panel .lp-sections,
 .panel .gd-row,
 .panel .sp-row,
-.panel .wk-actions,
-.panel .pg-summary,
-.panel .dk-form {
+.panel .pg-summary {
   overflow-x: hidden;
   min-width: 0;
 }
+.panel .wk-actions,
+.panel .dk-form { min-width: 0; }
 .panel .gd-row > span,
 .panel .wk-line,
 .panel .lp-kv b {
@@ -1386,3 +1392,35 @@ select.lp-input { cursor: pointer; }
   border-bottom: 1px solid transparent; transition: color 0.14s, border-color 0.14s;
 }
 .name-btn:hover { color: var(--gold); border-bottom-color: var(--gold-dim); }
+
+/* hiring: two numbers mean nothing without saying which is which */
+.wk-offer { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0 2px; }
+.wk-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 110px; min-width: 0; }
+.wk-field-n { flex: 0 0 84px; }
+.wk-field span {
+  font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--faint);
+}
+/* .btn-secondary is full-width by default, which starves the fields beside it */
+.wk-offer .btn-secondary { margin-top: 0; flex: 0 0 auto; width: auto; padding: 8px 14px; }
+.wk-field .lp-input { width: 100%; }
+
+/* ---- worker status labels ---- */
+/* the same chip language as the panels, floated over the world.
+   #ui > * forces pointer-events back on for direct children, so the layer
+   needs the id-qualified selector to actually let clicks through. */
+#ui > .worker-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.worker-label {
+  position: absolute; left: 0; top: 0; will-change: transform;
+  background: rgba(13, 16, 21, 0.88);
+  border: 1px solid rgba(224, 183, 86, 0.38);
+  color: #e5d5a9;
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.9px; text-transform: uppercase;
+  padding: 2px 8px 1px; border-radius: 99px; white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.15s;
+}
+/* the little stem tying the chip to its worker */
+.worker-label::after {
+  content: ""; position: absolute; left: 50%; top: 100%;
+  width: 1px; height: 5px; background: rgba(224, 183, 86, 0.45);
+}

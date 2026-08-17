@@ -15,6 +15,13 @@ export class NpcState extends Schema {
   @type("float32") x = 0;
   @type("float32") y = 0;
   @type("string") appearance = "";
+  // which way to face while standing (radians); 999 = no preference
+  @type("float32") heading = 999;
+  // why work is stalled ("nothing to stock") — empty when all is well
+  @type("string") status = "";
+  // entity id of whoever employs them ("" for citizens) — the client shows
+  // status labels only for workers on YOUR payrolls
+  @type("string") employer = "";
 }
 
 export class CityState extends Schema {

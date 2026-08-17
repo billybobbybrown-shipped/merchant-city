@@ -52,7 +52,7 @@ export class WorkersPanel {
     ui: HTMLElement,
     private selfEid: string,
     private actions: WorkerActions,
-    private myLots: () => Array<{ id: number; name: string }>
+    private myLots: () => Array<{ id: number; name: string; owner: string }>
   ) {
     this.el = document.createElement("div");
     this.el.className = "panel workers-panel";
@@ -83,15 +83,19 @@ export class WorkersPanel {
   }
 
   private render(workers: Worker[], offers: Offer[], employers: Employer[]) {
-    const lots = this.myLots();
+    const allLots = this.myLots();
     const lotLabel = (id: number | null) =>
-      id === null ? "" : lots.find((l) => l.id === id)?.name ?? lotName(id);
+      id === null ? "" : allLots.find((l) => l.id === id)?.name ?? lotName(id);
     const multi = employers.length > 1;
 
     // which payroll is on screen — default to yourself
     if (this.viewing === null || !employers.some((e) => e.eid === this.viewing))
       this.viewing = employers.find((e) => e.kind === "player")?.eid ?? employers[0]?.eid ?? null;
     const current = employers.find((e) => e.eid === this.viewing) ?? null;
+    // only the viewed employer's property is staffable — their workers, their
+    // lots. Your uuid keys your own lots; a company's entity id keys its.
+    const ownerKey = current?.kind === "player" ? this.selfEid : String(current?.eid ?? "");
+    const lots = allLots.filter((l) => l.owner === ownerKey);
     const staff = workers.filter((w) => w.employer === this.viewing);
     const myOffers = offers.filter((o) => o.employer === this.viewing);
 
@@ -117,7 +121,11 @@ export class WorkersPanel {
         html += `<div class="pk-empty">${
           current?.kind === "player" ? "You have" : `${current?.name ?? "This company"} has`
         } no staff yet — hire someone on the Hiring page.</div>`;
-      for (const w of staff) html += this.workerRow(w, lotLabel, lots);
+      // paused staff first — they're the ones needing a decision, and they're
+      // easy to lose under a long list of people already at work
+      const byName = [...staff].sort((a, b) => a.name.localeCompare(b.name));
+      for (const w of byName.filter((w) => !this.isWorking(w))) html += this.workerRow(w, lotLabel, lots);
+      for (const w of byName.filter((w) => this.isWorking(w))) html += this.workerRow(w, lotLabel, lots);
     } else {
     // ---- hiring page ----
     if (myOffers.length) {
@@ -131,9 +139,11 @@ export class WorkersPanel {
 
     else html += `<div class="pk-empty">No offers posted</div>`;
     html += `<div class="gd-cap gd-cap2">Post an offer</div>
-      <div class="lp-inline">
-        <input class="lp-input wk-wage" type="number" min="1" value="45" title="wage/day" />
-        <input class="lp-input wk-slots" type="number" min="1" max="10" value="1" title="how many" />
+      <div class="wk-offer">
+        <label class="wk-field"><span>Wage / day</span>
+          <input class="lp-input wk-wage" type="number" min="1" value="45" /></label>
+        <label class="wk-field wk-field-n"><span>Positions</span>
+          <input class="lp-input wk-slots" type="number" min="1" max="10" value="1" /></label>
         <button class="btn-secondary wk-hire">Post offer</button>
       </div>
       <div class="lp-hint">Citizens take offers at $${reservationWage("worker")}+/day ($${reservationWage("saver")}+ for wealthier ones). Hired by <b>${current?.kind === "player" ? "you" : current?.name}</b>, who pays their wage — but you can post them to any lot you control, company-held or personal.</div>`;
@@ -141,13 +151,14 @@ export class WorkersPanel {
 
     // payroll health up front: what staff cost per day and how long the
     // money lasts — the thing you actually need to know before hiring
-    const totalPay = staff.reduce((a, w) => a + w.wage, 0);
+    const totalPay = staff.filter((w) => this.isWorking(w)).reduce((a, w) => a + w.wage, 0);
+    const idle = staff.filter((w) => !this.isWorking(w)).length;
     const cash = current ? (current.kind === "player" ? this.actions.balance() : current.cash) : 0;
     const days = totalPay > 0 ? Math.floor(cash / totalPay) : null;
     const tight = days !== null && days < 4;
     const summary = `<div class="pg-summary">
         <div class="pg-stat"><span>Staff</span><b>${staff.length}</b></div>
-        <div class="pg-stat"><span>Payroll</span><b>${fmtMoney(totalPay)}/day</b></div>
+        <div class="pg-stat"><span>Payroll</span><b>${fmtMoney(totalPay)}/day</b>${idle ? `<span class="sp-cap">${idle} paused</span>` : ""}</div>
         <div class="pg-stat"><span>${current?.kind === "player" ? "Your cash" : "Company cash"}</span><b>${fmtMoney(cash)}</b></div>
         ${days !== null ? `<div class="pg-stat"><span>Covers</span><b class="${tight ? "mkt-down" : ""}">${days} day${days === 1 ? "" : "s"}</b></div>` : ""}
       </div>
@@ -181,10 +192,13 @@ export class WorkersPanel {
       const npc = Number(row.dataset.npc);
       const roleEl = row.querySelector<HTMLSelectElement>(".wk-role");
       const lotEl = row.querySelector<HTMLSelectElement>(".wk-lot");
-      const apply = () => {
+      // None idles a worker only when None is what you PICKED. Choosing a job
+      // while the location still reads None just waits for the location —
+      // unassigning there would wipe the job you picked a moment ago.
+      const apply = (chose: "role" | "lot") => {
         const role = roleEl?.value ?? "";
         if (!role) {
-          this.actions.unassign(npc);
+          if (chose === "role") this.actions.unassign(npc);
           return;
         }
         // a hauler works the whole network; everyone else needs an address
@@ -193,19 +207,27 @@ export class WorkersPanel {
           return;
         }
         const raw = lotEl?.value ?? "";
-        if (raw === "") return; // waiting on a property
+        if (raw === "") {
+          if (chose === "lot") this.actions.unassign(npc);
+          return;
+        }
         this.actions.assign(npc, Number(raw), role);
       };
-      roleEl?.addEventListener("change", apply);
-      lotEl?.addEventListener("change", apply);
+      roleEl?.addEventListener("change", () => apply("role"));
+      lotEl?.addEventListener("change", () => apply("lot"));
       row.querySelector(".wk-fire")?.addEventListener("click", () => this.actions.fire(npc));
     });
+  }
+
+  // on a job, somewhere to do it — the same test payroll uses
+  private isWorking(w: Worker): boolean {
+    return w.role !== null && (w.role === "hauler" || w.lotId !== null);
   }
 
   private workerRow(
     w: Worker,
     lotLabel: (id: number | null) => string,
-    lots: Array<{ id: number; name: string }>
+    lots: Array<{ id: number; name: string; owner: string }>
   ): string {
     const fleet = w.role === "hauler";
     const assigned = w.role !== null && (fleet || w.lotId !== null);
@@ -213,21 +235,24 @@ export class WorkersPanel {
     return `<div class="wk-row" data-npc="${w.eid}">
         <div class="wk-line">
           <b>${w.name}</b><span class="wk-wage">$${w.wage}/day</span>
-          <span class="wk-job">${assigned ? `${w.role} · ${where}` : "no job yet"}</span>
+          ${assigned ? "" : `<span class="wk-job wk-paused">paused · unpaid</span>`}
         </div>
         <div class="wk-actions">
           <select class="lp-input wk-role">
-            <option value="" ${w.role === null ? "selected" : ""}>— pick a job —</option>
+            <option value="" ${w.role === null ? "selected" : ""}>None</option>
             ${ROLES.map((r) => `<option value="${r}" ${r === w.role ? "selected" : ""}>${r}</option>`).join("")}
           </select>
           <select class="lp-input wk-lot" ${fleet ? "disabled" : ""}>
             ${
               fleet
                 ? `<option>Whole network</option>`
-                : `<option value="" ${w.lotId === null ? "selected" : ""}>— where —</option>` +
+                : `<option value="" ${w.lotId === null ? "selected" : ""}>None</option>` +
                   lots
                     .map((l) => `<option value="${l.id}" ${l.id === w.lotId ? "selected" : ""}>${l.name}</option>`)
-                    .join("")
+                    .join("") +
+                  (w.lotId !== null && !lots.some((l) => l.id === w.lotId)
+                    ? `<option value="${w.lotId}" selected>${lotLabel(w.lotId)}</option>`
+                    : "")
             }
           </select>
           <button class="gd-btn wk-fire" title="Fire">✕</button>

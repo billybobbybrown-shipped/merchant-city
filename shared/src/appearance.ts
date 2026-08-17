@@ -21,10 +21,10 @@ export interface StyleOption {
   label: string;
 }
 
-// a plain human range, light to deep, with both warm and cool undertones
+// a plain human range, light to deep
 export const SKIN_TONES = [
-  "#f8e0c8", "#f2d3b0", "#e8bd97", "#dda87c", "#cf9163",
-  "#bd7d4f", "#a3663d", "#8a5330", "#6d4025", "#52301b", "#3a2114", "#e0b9a0",
+  "#f2d3b0", "#e8bd97", "#dda87c", "#cf9163",
+  "#bd7d4f", "#a3663d", "#8a5330", "#6d4025", "#52301b", "#3a2114",
 ];
 
 export const HAIR_COLORS = [
@@ -79,7 +79,7 @@ const FIELDS: Array<[keyof Appearance, number]> = [
 export const APPEARANCE_VERSION = "1";
 
 export const DEFAULT_APPEARANCE: Appearance = {
-  skin: 2,
+  skin: 1,
   hair: 1,
   hairColor: 2,
   shirt: 0,

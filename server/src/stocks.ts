@@ -3,7 +3,8 @@ import {
   IPO_AUDIT_FEE,
   STOCK_FEE_RATE,
   circuitBand,
-  dividendPerShare,
+  declaredDps,
+  DIVIDEND_PERIOD_DAYS,
   floatValid,
   ipoEligible,
   ipoPriceBand,
@@ -57,7 +58,7 @@ export class StocksStore {
   async list() {
     const r = await pool.query(
       `select s.company_entity, e.name, s.shares_outstanding, s.float_shares, s.dividend_ratio,
-              s.prev_close, s.halted_until, s.ipo_price,
+              s.prev_close, s.halted_until, s.ipo_price, s.dps, s.pay_day_counter,
               (select price from trades t where t.world_id = $1 and t.asset_type = 'stock'
                  and t.item = 's:' || s.company_entity order by ts desc limit 1) as last
          from stocks s join entities e on e.id = s.company_entity
@@ -78,7 +79,11 @@ export class StocksStore {
         shares: Number(row.shares_outstanding),
         floatShares: Number(row.float_shares),
         dividendRatio: Number(row.dividend_ratio),
-        prevClose: row.prev_close !== null ? Number(row.prev_close) : null,
+        dps: Number(row.dps),
+        payInDays: DIVIDEND_PERIOD_DAYS - Number(row.pay_day_counter),
+        // day one has no close yet — the IPO price is the reference, so the
+        // daily change chip works from the first trade instead of showing "—"
+        prevClose: row.prev_close !== null ? Number(row.prev_close) : Number(row.ipo_price) || null,
         last,
         marketCap: last !== null ? Math.round(last * Number(row.shares_outstanding)) : null,
         halted: row.halted_until !== null && new Date(row.halted_until).getTime() > Date.now(),
@@ -415,7 +420,10 @@ export class StocksStore {
     if (!upd.rowCount) throw new EconomyError("not a listed company");
   }
 
-  // daily close: pay dividends from real profit, roll prev_close, lift halts
+  // daily close: roll prev_close, lift halts, count the pay period down.
+  // Every DIVIDEND_PERIOD_DAYS-th day is pay day: the declared per-share
+  // rate targets the policy's annual yield on the share price (1-7% for
+  // income names, like real markets), then every holder gets paid.
   async runDay(): Promise<void> {
     const stocks = await pool.query("select * from stocks", []);
     for (const s of stocks.rows) {
@@ -427,35 +435,29 @@ export class StocksStore {
           [WORLD_ID, stockKey(companyEid)]
         );
         const close = last.rowCount ? Number(last.rows[0].price) : (s.prev_close !== null ? Number(s.prev_close) : Number(s.ipo_price));
+        const days = Number(s.pay_day_counter) + 1;
         await pool.query(
-          "update stocks set prev_close = $2, halted_until = null where company_entity = $1",
-          [companyEid, close]
+          "update stocks set prev_close = $2, halted_until = null, pay_day_counter = $3 where company_entity = $1",
+          [companyEid, close, days]
         );
+        if (days < DIVIDEND_PERIOD_DAYS) continue;
 
-        const ratio = Number(s.dividend_ratio);
-        if (ratio <= 0) continue;
-        // the game-day's operating profit from the ledger
-        const fin = await pool.query(
-          `select
-             coalesce(sum(case when a_to.entity_id = $1 and l.category not in ('transfer','ipo','dividend')
-                 and l.reason not like 'trade % s:%' then l.amount else 0 end), 0)
-               - coalesce(sum(case when a_from.entity_id = $1 and l.category not in ('transfer','ipo','dividend')
-                 and l.reason not like 'trade % s:%' then l.amount else 0 end), 0) as profit
-             from ledger l
-             left join accounts a_to on a_to.id = l.to_account
-             left join accounts a_from on a_from.id = l.from_account
-            where (a_to.entity_id = $1 or a_from.entity_id = $1) and l.ts > now() - interval '10 minutes'`,
-          [companyEid]
-        );
+        // pay day: the declared rate targets the policy's annual yield on
+        // the current share price, paid from company cash
         const cashRow = await pool.query(
           "select balance from accounts where entity_id = $1 and currency = 'clean'",
           [companyEid]
         );
-        const dps = dividendPerShare(
-          ratio,
-          Number(fin.rows[0].profit),
+        const dps = declaredDps(
+          Number(s.dividend_ratio),
+          close,
+          Number(s.dps),
           Number(cashRow.rows[0]?.balance ?? 0),
           Number(s.shares_outstanding)
+        );
+        await pool.query(
+          "update stocks set dps = $2, last_pay = now(), pay_day_counter = 0 where company_entity = $1",
+          [companyEid, dps]
         );
         if (dps <= 0) continue;
         const holders = await pool.query(

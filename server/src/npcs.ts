@@ -1,4 +1,6 @@
 import {
+  BuildingDef,
+  doorCells,
   BASE_PRICE,
   buildingForLot,
   CityMap,
@@ -91,10 +93,18 @@ export interface Npc {
     price: number;
     ownerEid: number;
     need: "food" | "goods" | "vice";
+    // shopping is a walk through the shop, not a transaction at the kerb:
+    // in the door, to the shelf, to the register's customer side, out
+    stage: "enter" | "shelf" | "till" | "leave";
+    arriveHeading: number | null;
   } | null;
+  // which way to face while standing still (client rotation, radians)
+  heading: number | null;
+  // a word to the owner floating over their head — why work is stalled
+  status: string;
   busy: boolean;
   // work: a loop of spots the job takes them to, and what they're carrying
-  work: Array<{ x: number; y: number; act: string; nx?: number; ny?: number }>;
+  work: Array<{ x: number; y: number; act: string; nx?: number; ny?: number; face?: { x: number; y: number } }>;
   workStep: number;
   workAt: { x: number; y: number } | null;
   workPath: Array<{ x: number; y: number }>;
@@ -135,12 +145,12 @@ export class NpcSim {
       const b = buildingForLot(map.seed, l);
       if (b && (b.kind === "house" || b.kind === "apartment")) this.residential.push(l);
     }
-    // public wander spots: sidewalk tiles sampled across the map
-    for (let i = 0; i < 400; i++) {
-      const x = Math.floor((i * 7919) % map.width);
-      const y = Math.floor((i * 104729) % map.height);
-      if (map.tiles[y * map.width + x] === 2) this.wanderTargets.push({ x, y });
-    }
+    // Public wander spots: every sidewalk tile on the map. The old prime-stride
+    // lattice collapsed to 26 unique points under mod-width, so the whole city
+    // strolled between the same few corners and pivoted at the same spots.
+    for (let y = 0; y < map.height; y++)
+      for (let x = 0; x < map.width; x++)
+        if (map.tiles[y * map.width + x] === 2) this.wanderTargets.push({ x, y });
   }
 
   private offers = new Map<string, Offer[]>(); // item -> offers
@@ -252,6 +262,8 @@ export class NpcSim {
         lastSx: r.x,
         lastSy: r.y,
         errand: null,
+        heading: null,
+        status: "",
         busy: false,
         work: [],
         workStep: 0,
@@ -327,6 +339,8 @@ export class NpcSim {
           lastSx: hx,
           lastSy: hy,
           errand: null,
+          heading: null,
+          status: "",
           busy: false,
           work: [],
           workStep: 0,
@@ -397,6 +411,7 @@ export class NpcSim {
         for (const b of await this.employerBays(n.employerEntity))
           if (!spots.some((sp) => Math.hypot(sp.x - b.x, sp.y - b.y) < 1))
             spots.push({ ...b, act: "haul" });
+      this.setStatus(n, spots.length >= 2 ? "" : "nothing to haul");
       if (spots.length) n.work = spots;
       return;
     }
@@ -466,30 +481,17 @@ export class NpcSim {
       // counter was turned.
       const till = firstOf((i) => i === "counter");
       if (till && spec && bdef) {
-        const def = furnitureById(till.item);
-        const fw = till.rot % 2 === 0 ? def?.w ?? 1 : def?.h ?? 1;
-        const fh = till.rot % 2 === 0 ? def?.h ?? 1 : def?.w ?? 1;
-        const dir = [
-          [1, 0],
-          [0, 1],
-          [-1, 0],
-          [0, -1],
-        ][till.rot % 4];
-        // the footprint cell furthest along the register's side
-        const reg = {
-          x: till.x + (dir[0] > 0 ? fw - 1 : 0),
-          y: till.y + (dir[1] > 0 ? fh - 1 : 0),
-        };
         // The till is a post, not a preference: the cashier takes the spot
-        // behind the register and anyone else standing there moves along.
-        const c = standingSpot(spec, reg.x, reg.y, 1, 1, "back", (cx, cy) =>
-          solid.has(`${cx},${cy}`)
-        );
+        // behind the register and anyone else standing there moves along. Her
+        // side and the customers' side come from ONE computation (tillSpots),
+        // so she always faces the spot the queue actually forms on.
+        const { reg, cash: c, cust } = this.tillSpots(spec, (cx, cy) => solid.has(`${cx},${cy}`), till);
         this.evictFrom(lotId, c.x, c.y, n.eid);
         claim(c.x, c.y);
         const w = fixtureWorld(lot, bdef, c.x, c.y);
         const mid = fixtureWorld(lot, bdef, reg.x, reg.y);
         const len = Math.hypot(w.x - mid.x, w.z - mid.z) || 1;
+        const cw = fixtureWorld(lot, bdef, cust.x, cust.y);
         n.work = [
           {
             x: w.x,
@@ -497,6 +499,7 @@ export class NpcSim {
             act: "till",
             nx: (w.x - mid.x) / len,
             ny: (w.z - mid.z) / len,
+            face: { x: cw.x, y: cw.z },
           },
         ];
         return;
@@ -526,6 +529,7 @@ export class NpcSim {
         bay ? beside(bay, "bay") : null,
         rack ? beside(rack, "rack") : null,
       ].filter(Boolean) as typeof n.work;
+      this.setStatus(n, spots.length ? "" : "nothing to store");
       n.work = spots.length ? spots : [centre];
       return;
     }
@@ -537,9 +541,16 @@ export class NpcSim {
         const w = siteCellWorld(lot, r.x + r.w / 2, r.y + r.h / 2);
         spots.push({ x: w.x, y: w.z, act: "harvest" });
       }
+      // no field drawn on this lot = nothing to work: stand and say so,
+      // instead of pacing a loop around a farm that doesn't exist
+      if (!spots.length) {
+        this.setStatus(n, role === "miner" ? "nowhere to mine" : "nothing to farm");
+        n.work = [centre];
+        return;
+      }
       const bay = await this.bayWorldPos(lotId);
       if (bay) spots.push({ ...bay, act: "deliver" });
-      n.work = spots.length ? spots : [centre];
+      n.work = spots;
       return;
     }
     n.work = [centre];
@@ -559,32 +570,146 @@ export class NpcSim {
     }
     n.workStep = (n.workStep + 1) % n.work.length;
     const spot = n.work[n.workStep];
-    n.workPath = this.indoorRouteTo(n, spot);
-    n.workAt = n.workPath.shift() ?? { x: spot.x, y: spot.y };
+    n.heading = null;
+    void this.buildWorkLegs(n, spot);
     return true;
   }
 
-  // Inside a building the straight line would cut through the fittings, so
-  // walk the floor plan around them. Outdoors there is nothing to dodge.
-  private indoorRouteTo(n: Npc, spot: { x: number; y: number }): Array<{ x: number; y: number }> {
-    const lotId = n.employerLot;
-    if (lotId === null || !this.interiors) return [];
-    const lot = this.lots.lotDef(lotId);
-    const bdef = this.lots.buildingDef(lotId);
-    if (!lot || !bdef) return [];
-    const spec = interiorSpec(lot, bdef, 0);
-    const from = worldToCell(lot, bdef, n.x, n.y);
-    const to = worldToCell(lot, bdef, spot.x, spot.y);
-    if (!cellInside(spec, from.x, from.y) || !cellInside(spec, to.x, to.y)) return [];
-    const blocked = new Set<number>();
-    for (const it of this.workFixtures.get(lotId) ?? [])
-      for (const [cx, cy] of cellsOf(it)) blocked.add(cy * spec.w + cx);
-    return interiorRoute(spec, blocked, from, to)
-      .map((c) => {
-        const w = fixtureWorld(lot, bdef, c.x, c.y);
-        return { x: w.x, y: w.z };
-      })
-      .concat([{ x: spot.x, y: spot.y }]);
+  // The register's two working sides, whichever way the counter is turned.
+  // "Behind" isn't a compass direction — it's the side hemmed in by the room
+  // (wall, shelf), and that's the cashier's. Customers get the side with room
+  // for a line to form. Cell-space front/back broke the moment a counter was
+  // rotated: the ends became the sides and the cashier stood off the till.
+  private tillSpots(
+    spec: ReturnType<typeof interiorSpec>,
+    solid: (cx: number, cy: number) => boolean,
+    till: { item: string; x: number; y: number; rot: number }
+  ) {
+    const def = furnitureById(till.item);
+    const fw = till.rot % 2 === 0 ? def?.w ?? 1 : def?.h ?? 1;
+    const fh = till.rot % 2 === 0 ? def?.h ?? 1 : def?.w ?? 1;
+    const dir = [[1, 0], [0, 1], [-1, 0], [0, -1]][till.rot % 4];
+    const reg = {
+      x: till.x + (dir[0] > 0 ? fw - 1 : 0),
+      y: till.y + (dir[1] > 0 ? fh - 1 : 0),
+    };
+    const perp = { x: -dir[1], y: dir[0] };
+    const open = (cx: number, cy: number) => cellInside(spec, cx, cy) && !solid(cx, cy);
+    const depth = (sx: number, sy: number) => {
+      let d = 0;
+      for (let i = 1; i <= 4; i++) {
+        if (!open(reg.x + sx * i, reg.y + sy * i)) break;
+        d++;
+      }
+      return d;
+    };
+    const tight = depth(perp.x, perp.y) <= depth(-perp.x, -perp.y);
+    const cashSide = tight ? perp : { x: -perp.x, y: -perp.y };
+    const custSide = tight ? { x: -perp.x, y: -perp.y } : perp;
+    const cash = open(reg.x + cashSide.x, reg.y + cashSide.y)
+      ? { x: reg.x + cashSide.x, y: reg.y + cashSide.y }
+      : standingSpot(spec, reg.x, reg.y, 1, 1, "back", solid);
+    const cust = open(reg.x + custSide.x, reg.y + custSide.y)
+      ? { x: reg.x + custSide.x, y: reg.y + custSide.y }
+      : standingSpot(spec, reg.x, reg.y, 1, 1, "front", solid);
+    return { reg, cash, cust };
+  }
+
+  // Every trip to a work spot respects architecture: leave the building you're
+  // in through its door, walk the streets, and enter the destination through
+  // its door. The straight line — and haulers crossing the city through
+  // whatever stood in the way — is what this replaces.
+  private async buildWorkLegs(n: Npc, spot: { x: number; y: number }): Promise<void> {
+    const legs: Array<{ x: number; y: number }> = [];
+    const destLot = this.lotAtWorld(spot.x, spot.y);
+    const curLot = this.lotAtWorld(n.x, n.y);
+    const geomOf = async (lotId: number) => {
+      const g = this.shopGeom(lotId);
+      if (!g) return null;
+      const fixtures = (await this.interiors!.items(lotId)).filter((f) => (f.floor ?? 0) === 0);
+      const blocked = new Set<number>();
+      for (const it of fixtures)
+        if (!furnitureById(it.item)?.walkable) for (const [cx, cy] of cellsOf(it)) blocked.add(cy * g.spec.w + cx);
+      return { ...g, blocked };
+    };
+    const cellW = (g: NonNullable<Awaited<ReturnType<typeof geomOf>>>, c: { x: number; y: number }) => {
+      const w = fixtureWorld(g.lot, g.bdef, c.x, c.y);
+      return { x: w.x, y: w.z };
+    };
+
+    const curG = curLot ? await geomOf(curLot.id) : null;
+    const curCell = curG ? worldToCell(curG.lot, curG.bdef, n.x, n.y) : null;
+    const inside = !!(curG && curCell && cellInside(curG.spec, curCell.x, curCell.y));
+
+    const destG = destLot ? await geomOf(destLot.id) : null;
+    const destCell = destG ? worldToCell(destG.lot, destG.bdef, spot.x, spot.y) : null;
+    const destInside = !!(destG && destCell && cellInside(destG.spec, destCell.x, destCell.y));
+
+    if (inside && destInside && curLot!.id === destLot!.id) {
+      // moving within one building: the floor plan is the whole route
+      legs.push(...interiorRoute(curG!.spec, curG!.blocked, curCell!, destCell!).map((c) => cellW(curG!, c)));
+      legs.push({ x: spot.x, y: spot.y });
+    } else {
+      if (inside) {
+        // out through the door of the building you're in
+        legs.push(...interiorRoute(curG!.spec, curG!.blocked, curCell!, curG!.door).map((c) => cellW(curG!, c)));
+        legs.push(cellW(curG!, curG!.door));
+      }
+      const start = legs.length ? legs[legs.length - 1] : { x: n.x, y: n.y };
+      const entry = destInside ? cellW(destG!, destG!.door) : { x: spot.x, y: spot.y };
+      const street = findPath(
+        this.map,
+        Math.floor(start.x / TS),
+        Math.floor(start.y / TS),
+        Math.floor(entry.x / TS),
+        Math.floor(entry.y / TS)
+      );
+      if (street) legs.push(...street.map((t) => ({ x: (t.x + 0.5) * TS, y: (t.y + 0.5) * TS })));
+      if (destInside) {
+        // in through the destination's door, around its furniture
+        legs.push(cellW(destG!, destG!.door));
+        legs.push(...interiorRoute(destG!.spec, destG!.blocked, destG!.door, destCell!).map((c) => cellW(destG!, c)));
+      }
+      legs.push({ x: spot.x, y: spot.y });
+    }
+    n.workAt = legs.shift() ?? { x: spot.x, y: spot.y };
+    n.workPath = legs;
+  }
+
+  // which lot a world position stands on, if any
+  private lotAtWorld(wx: number, wy: number): LotDef | null {
+    const tx = Math.floor(wx / TS);
+    const ty = Math.floor(wy / TS);
+    for (const l of this.map.lots)
+      if (tx >= l.x && tx < l.x + l.w && ty >= l.y && ty < l.y + l.h) return l;
+    return null;
+  }
+
+  // the rotation the client renders when an NPC stands still facing from
+  // their spot toward a point — same convention as its walk-facing math
+  private lookToward(fromX: number, fromY: number, atX: number, atY: number): number {
+    return Math.atan2(atX - fromX, atY - fromY) + Math.PI;
+  }
+
+  private tillQueue = new Map<number, number[]>();
+
+  private queueIndex(lotId: number, eid: number): number {
+    const q = this.tillQueue.get(lotId) ?? [];
+    let i = q.indexOf(eid);
+    if (i === -1) {
+      q.push(eid);
+      this.tillQueue.set(lotId, q);
+      i = q.length - 1;
+    }
+    return i;
+  }
+
+  private leaveQueue(lotId: number, eid: number): void {
+    const q = this.tillQueue.get(lotId);
+    if (!q) return;
+    const i = q.indexOf(eid);
+    if (i !== -1) q.splice(i, 1);
+    if (!q.length) this.tillQueue.delete(lotId);
   }
 
   // fixtures per lot, refreshed when a worker's loop is built
@@ -633,6 +758,7 @@ export class NpcSim {
     n.work = [];
     n.workAt = null;
     n.carrying = null;
+    this.setStatus(n, "");
   }
 
   // the loading bay of a property, in world coordinates
@@ -689,9 +815,15 @@ export class NpcSim {
         if (need <= 0) continue;
         if (await this.goods.takeFromProperty(lotId, view.item, need)) {
           n.carrying = { item: view.item, qty: need };
+          this.setStatus(n, "");
           return;
         }
       }
+      // Nothing worth carrying: wait AT the rack and say so, rather than
+      // pacing the rack-shelf loop with empty hands.
+      this.setStatus(n, listings.rowCount ? "nothing to stock" : "no shelves priced");
+      n.workStep = (n.workStep - 1 + n.work.length) % n.work.length;
+      n.workPause = Date.now() + 9000;
       return;
     }
     if (act === "restock" && n.carrying) {
@@ -712,11 +844,94 @@ export class NpcSim {
         await this.goods.putIntoProperty(lotId, n.carrying.item, n.carrying.qty);
       }
       n.carrying = null;
+      this.setStatus(n, "");
     }
+    if (act === "craft") {
+      // standing at the machine with an empty queue helps nobody — say so
+      const pending = await this.goods.pendingCrafts(lotId).catch(() => []);
+      this.setStatus(n, pending.length ? "" : "nothing to craft");
+      if (!pending.length) n.workPause = Date.now() + 9000;
+      return;
+    }
+    if (act === "deliver") {
+      // walking the pick to the bay only means something if the day produced
+      // one — otherwise wait here; the field check will wake them
+      const bay = await this.goods.inventory("dock", String(lotId)).catch(() => ({}) as Record<string, number>);
+      const held = Object.values(bay).reduce((a, q) => a + q, 0);
+      if (held <= 0) {
+        this.setStatus(n, n.jobRole === "miner" ? "nowhere to mine" : "nothing to farm");
+        n.workStep = (n.workStep - 1 + Math.max(1, n.work.length)) % Math.max(1, n.work.length);
+        n.workPause = Date.now() + 9000;
+      }
+      return;
+    }
+    if (act === "bay" || act === "rack") {
+      // a manager has stock to see to when the bay holds anything, or when the
+      // racks are due a shuffle to the shelves — an empty bay is a quiet day
+      const bay = await this.goods.inventory("dock", String(lotId)).catch(() => ({}) as Record<string, number>);
+      const held = Object.values(bay).reduce((a, q) => a + q, 0);
+      this.setStatus(n, held > 0 ? "" : "nothing to store");
+      if (held <= 0) {
+        n.workStep = (n.workStep - 1 + Math.max(1, n.work.length)) % Math.max(1, n.work.length);
+        n.workPause = Date.now() + 9000;
+      }
+      return;
+    }
+    if (act === "haul") {
+      // a hauler's day exists while any bay on the route holds cargo
+      let cargo = 0;
+      const seen = new Set<number>();
+      const routes = await pool.query(
+        `select dl.lot_id, dl.partner_lot from dock_lines dl
+           join lots l on l.id = dl.lot_id
+          where dl.world_id = $1 and l.owner_entity_id = $2 limit 6`,
+        [WORLD_ID, n.employerEntity]
+      );
+      for (const row of routes.rows)
+        for (const id of [Number(row.lot_id), Number(row.partner_lot)]) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const inv = await this.goods.inventory("dock", String(id)).catch(() => ({}) as Record<string, number>);
+          cargo += Object.values(inv).reduce((a, q) => a + q, 0);
+        }
+      this.setStatus(n, cargo > 0 ? "" : "nothing to haul");
+      if (cargo <= 0) {
+        n.workStep = (n.workStep - 1 + Math.max(1, n.work.length)) % Math.max(1, n.work.length);
+        n.workPause = Date.now() + 9000;
+      }
+      return;
+    }
+    if (act === "harvest") {
+      const st = this.lots.get(lotId);
+      const src = st?.source;
+      // a mine can give out entirely; a farm only ever waits on storage room
+      const exhausted = !!src && src.reserve > 0 && src.extracted >= src.reserve;
+      const cap = await this.goods.lotCapacity(lotId).catch(() => 0);
+      const inv = await this.goods.inventory("lot", String(lotId)).catch(() => ({}) as Record<string, number>);
+      const held = Object.values(inv).reduce((a, q) => a + q, 0);
+      const full = cap > 0 && held >= cap;
+      const miner = n.jobRole === "miner";
+      const status = exhausted && miner ? "nowhere to mine" : full ? (miner ? "storage full" : "nothing to farm") : "";
+      this.setStatus(n, status);
+      if (status) {
+        // wait right here on the site until something changes
+        n.workStep = (n.workStep - 1 + Math.max(1, n.work.length)) % Math.max(1, n.work.length);
+        n.workPause = Date.now() + 9000;
+      }
+      return;
+    }
+  }
+
+  // publish a status word only when it changes — it rides the NPC state
+  private setStatus(n: Npc, status: string): void {
+    if (n.status === status) return;
+    n.status = status;
+    this.publish(n, true);
   }
 
   // send an NPC toward a world position via A*
   sendTo(n: Npc, wx: number, wy: number): boolean {
+    n.heading = null;
     const path = findPath(
       this.map,
       Math.floor(n.x / TS),
@@ -738,12 +953,27 @@ export class NpcSim {
       n.goods = Math.max(0, n.goods - GOODS_DECAY_PER_SEC * dtSec);
       if (n.moving && n.path.length) {
         const wp = n.path[0];
-        const tx = (wp.x + 0.5) * TS;
-        const ty = (wp.y + 0.5) * TS;
+        // The last waypoint of any CITIZEN trip takes a per-citizen offset
+        // inside the tile — strolls, going home, and shopping alike — so the
+        // second customer at a shelf stands beside the first instead of inside
+        // them. Stable per NPC (seeded), not per frame. Workers keep exact
+        // spots: a cashier belongs BEHIND the register, not near it.
+        const last = n.path.length === 1 && !n.jobRole;
+        const j = last ? ((n.eid * 2654435761) >>> 16) : 0;
+        const jx = last ? (((j & 0xff) / 255) * 0.56 - 0.28) * TS : 0;
+        const jy = last ? ((((j >> 8) & 0xff) / 255) * 0.56 - 0.28) * TS : 0;
+        const tx = (wp.x + 0.5) * TS + jx;
+        const ty = (wp.y + 0.5) * TS + jy;
         const dx = tx - n.x;
         const dy = ty - n.y;
         const dist = Math.hypot(dx, dy);
-        const step = NPC_SPEED * dtSec;
+        // Nobody walks at exactly the same pace. With one shared speed, two
+        // people who ever coincide — leaving the same shop, merging at a
+        // corner — stay perfectly superimposed for their whole shared route,
+        // reading as one broken body. A stable ±12% per citizen breaks any
+        // lockstep within a few steps.
+        const pace = 0.88 + (((n.eid * 40503) >>> 4) % 256) / 1064;
+        const step = NPC_SPEED * pace * dtSec;
         if (dist <= step) {
           n.x = tx;
           n.y = ty;
@@ -751,7 +981,7 @@ export class NpcSim {
           if (!n.path.length) {
             n.moving = false;
             this.publish(n, true);
-            if (n.errand) void this.completeErrand(n);
+            if (n.errand) void this.errandArrive(n);
           }
         } else {
           n.x += (dx / dist) * step;
@@ -774,8 +1004,21 @@ export class NpcSim {
           } else {
             n.workAt = null;
             n.workPause = now + WORK_PAUSE_MS;
-            const spot = n.work[n.workStep];
-            if (spot) void this.onWorkArrival(n, spot.act);
+            if (n.errand) {
+              // a shopper reached the end of an indoor leg — face what they
+              // came for and let the stage timer advance the errand
+              n.heading = n.errand.arriveHeading;
+              n.nextDecideAt = now + 900;
+            } else {
+              const spot = n.work[n.workStep];
+              // stand facing the thing being worked, not whichever way the
+              // walk happened to end — the normal points away from the
+              // fixture, so the fixture is behind it
+              if (spot?.face) n.heading = this.lookToward(n.x, n.y, spot.face.x, spot.face.y);
+              else if (spot?.nx !== undefined && spot?.ny !== undefined)
+                n.heading = Math.atan2(-spot.nx, -spot.ny) + Math.PI;
+              if (spot) void this.onWorkArrival(n, spot.act);
+            }
           }
           this.publish(n, true);
         } else {
@@ -785,7 +1028,9 @@ export class NpcSim {
         }
       } else if (now >= n.nextDecideAt) {
         n.nextDecideAt = now + DECIDE_EVERY_MS * (0.5 + Math.random());
-        this.decide(n);
+        // mid-errand the timer advances the shopping trip, never a stroll
+        if (n.errand) void this.errandArrive(n);
+        else this.decide(n);
       }
     }
   }
@@ -805,13 +1050,25 @@ export class NpcSim {
     if (n.vice > 0 && Math.random() < n.vice * 0.3 && this.startShopping(n, "vice")) return;
     const roll = Math.random();
     if (roll < 0.45 && this.wanderTargets.length) {
-      const t = this.wanderTargets[Math.floor(Math.random() * this.wanderTargets.length)];
-      this.sendTo(n, (t.x + 0.5) * TS, (t.y + 0.5) * TS);
+      this.strollSomewhere(n);
     } else if (roll < 0.65 && n.homeLot !== null) {
       const home = this.lots.lotDef(n.homeLot);
       if (home) this.sendTo(n, (home.x + home.w / 2) * TS, (home.y + home.h / 2) * TS);
     }
     // else: keep loitering
+  }
+
+  // a walk around the block, not a trek across the city — the first of a few
+  // draws that's a moderate distance away
+  private strollSomewhere(n: Npc): void {
+    if (!this.wanderTargets.length) return;
+    let t = this.wanderTargets[Math.floor(Math.random() * this.wanderTargets.length)];
+    for (let tries = 0; tries < 5; tries++) {
+      const d = Math.hypot((t.x + 0.5) * TS - n.x, (t.y + 0.5) * TS - n.y);
+      if (d > 6 && d < 34 * TS) break;
+      t = this.wanderTargets[Math.floor(Math.random() * this.wanderTargets.length)];
+    }
+    this.sendTo(n, (t.x + 0.5) * TS, (t.y + 0.5) * TS);
   }
 
   // pick the best shop for a need: cheap vs the reference price, close, inviting
@@ -831,7 +1088,8 @@ export class NpcSim {
       }
     }
     if (!best) return false;
-    if (!this.sendTo(n, best.x, best.y)) return false;
+    const door = this.shopDoor(best.lotId);
+    if (!this.sendTo(n, door?.x ?? best.x, door?.y ?? best.y)) return false;
     n.errand = {
       lotId: best.lotId,
       furnId: best.furnId,
@@ -839,8 +1097,259 @@ export class NpcSim {
       price: best.price,
       ownerEid: best.ownerEid,
       need,
+      stage: "enter",
+      arriveHeading: null,
     };
     return true;
+  }
+
+  // the shop's front door in world coordinates, and its interior geometry
+  private shopGeom(lotId: number) {
+    if (!this.interiors) return null;
+    const lot = this.lots.lotDef(lotId);
+    const bdef = this.lots.buildingDef(lotId);
+    if (!lot || !bdef) return null;
+    const spec = interiorSpec(lot, bdef, 0);
+    const door = doorCells(spec)[0];
+    if (!door) return null;
+    return { lot, bdef, spec, door };
+  }
+
+  private shopDoor(lotId: number): { x: number; y: number } | null {
+    const g = this.shopGeom(lotId);
+    if (!g) return null;
+    const w = fixtureWorld(g.lot, g.bdef, g.door.x, g.door.y);
+    return { x: w.x, y: w.z };
+  }
+
+  // walk an indoor leg of the errand: door/current position -> a target cell,
+  // around the furniture, using the same engine the workers walk with
+  private errandWalkTo(
+    n: Npc,
+    g: { lot: LotDef; bdef: BuildingDef; spec: ReturnType<typeof interiorSpec>; door: { x: number; y: number } },
+    fixtures: PlacedItem[],
+    toCell: { x: number; y: number },
+    face: { x: number; y: number } | null
+  ): void {
+    const blocked = new Set<number>();
+    for (const it of fixtures)
+      if (!furnitureById(it.item)?.walkable) for (const [cx, cy] of cellsOf(it)) blocked.add(cy * g.spec.w + cx);
+    let from = worldToCell(g.lot, g.bdef, n.x, n.y);
+    const lead: Array<{ x: number; y: number }> = [];
+    if (!cellInside(g.spec, from.x, from.y)) {
+      // outside: step in through the door first
+      const dw = fixtureWorld(g.lot, g.bdef, g.door.x, g.door.y);
+      lead.push({ x: dw.x, y: dw.z });
+      from = g.door;
+    }
+    const route = interiorRoute(g.spec, blocked, from, toCell).map((c) => {
+      const w = fixtureWorld(g.lot, g.bdef, c.x, c.y);
+      return { x: w.x, y: w.z };
+    });
+    const endW = fixtureWorld(g.lot, g.bdef, toCell.x, toCell.y);
+    const legs = [...lead, ...route, { x: endW.x, y: endW.z }];
+    n.heading = null;
+    n.errand!.arriveHeading = face ? this.lookToward(endW.x, endW.z, face.x, face.y) : null;
+    n.workAt = legs.shift() ?? null;
+    n.workPath = legs;
+  }
+
+  // The shopping trip, stage by stage. Called when a walk leg completes and
+  // by the stage timer while standing at the shelf or the register.
+  private async errandArrive(n: Npc): Promise<void> {
+    const e = n.errand;
+    if (!e || n.busy || n.workAt) return;
+    const g = this.shopGeom(e.lotId);
+    if (!g) {
+      // no interior to walk (stall on a bare lot): buy at the kerb as before
+      await this.completeErrand(n);
+      return;
+    }
+    const fixtures = (await this.interiors!.items(e.lotId)).filter((f) => (f.floor ?? 0) === 0);
+    const solid = (cx: number, cy: number) =>
+      fixtures.some((f) => !furnitureById(f.item)?.walkable && cellsOf(f).some(([x, y]) => x === cx && y === cy));
+
+    if (e.stage === "enter") {
+      // inside — now walk to the shelf they came for
+      const shelf = fixtures.find((f) => f.id === e.furnId);
+      if (!shelf) {
+        this.leaveQueue(e.lotId, n.eid);
+        n.errand = null;
+        return;
+      }
+      const def = furnitureById(shelf.item);
+      const fw = shelf.rot % 2 === 0 ? def?.w ?? 1 : def?.h ?? 1;
+      const fh = shelf.rot % 2 === 0 ? def?.h ?? 1 : def?.w ?? 1;
+      // Browse anywhere along the shelf: every open cell around it is a valid
+      // place to stand, and each shopper picks their own — one canonical spot
+      // made every customer walk the same line and stop on the same tile.
+      const options: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i < Math.max(fw, 1); i++) {
+        options.push({ x: shelf.x + i, y: shelf.y + fh });
+        options.push({ x: shelf.x + i, y: shelf.y - 1 });
+      }
+      for (let i = 0; i < Math.max(fh, 1); i++) {
+        options.push({ x: shelf.x - 1, y: shelf.y + i });
+        options.push({ x: shelf.x + fw, y: shelf.y + i });
+      }
+      const open = options.filter((c) => cellInside(g.spec, c.x, c.y) && !solid(c.x, c.y));
+      const c = open.length
+        ? open[Math.floor(Math.random() * open.length)]
+        : standingSpot(g.spec, shelf.x, shelf.y, fw, fh, "front", solid);
+      const mid = fixtureWorld(g.lot, g.bdef, shelf.x + (fw - 1) / 2, shelf.y + (fh - 1) / 2);
+      e.stage = "shelf";
+      this.errandWalkTo(n, g, fixtures, c, { x: mid.x, y: mid.z });
+      // and not dead-centre of the cell either — drift a little within it
+      const drift = () => (Math.random() - 0.5) * 0.5;
+      const endLeg = n.workPath.length ? n.workPath[n.workPath.length - 1] : n.workAt;
+      if (endLeg) {
+        endLeg.x += drift();
+        endLeg.y += drift();
+      }
+      return;
+    }
+
+    // where the line forms: the customer spot in front of the register, with
+    // the queue marching straight back from it
+    const tillLine = () => {
+      const till = fixtures.find((f) => f.item === "counter");
+      if (!till) return null;
+      const { reg, cust: c } = this.tillSpots(g.spec, solid, till);
+      const mid = fixtureWorld(g.lot, g.bdef, reg.x, reg.y);
+      const front = fixtureWorld(g.lot, g.bdef, c.x, c.y);
+      const len = Math.hypot(front.x - mid.x, front.z - mid.z) || 1;
+      return {
+        cell: c,
+        regMid: { x: mid.x, y: mid.z },
+        front: { x: front.x, y: front.z },
+        back: { x: (front.x - mid.x) / len, y: (front.z - mid.z) / len },
+      };
+    };
+
+    if (e.stage === "shelf") {
+      // take the item off the shelf; pay at the register on the way out
+      const took = await pool
+        .query(
+          `update inventories set qty = qty - 1
+            where world_id = $1 and holder_type = 'shelf' and holder_id = $2 and item = $3 and qty >= 1`,
+          [WORLD_ID, String(e.furnId), e.item]
+        )
+        .catch(() => null);
+      if (!took?.rowCount) {
+        // The shelf is bare — make the offer cache say so NOW. It otherwise
+        // keeps advertising stale stock until the next 30s refresh, and that
+        // window sends a stream of customers into an empty shop.
+        const stale = this.offers.get(e.item)?.find((x) => x.lotId === e.lotId && x.furnId === e.furnId);
+        if (stale) stale.qty = 0;
+        e.stage = "leave";
+        this.errandWalkTo(n, g, fixtures, g.door, null);
+        return;
+      }
+      const cached = this.offers.get(e.item);
+      const o = cached?.find((x) => x.lotId === e.lotId);
+      if (o) o.qty -= 1;
+      const line = tillLine();
+      if (!line) {
+        // no register in this shop — settle up right here
+        await this.settleErrand(n, true);
+        e.stage = "leave";
+        this.errandWalkTo(n, g, fixtures, g.door, null);
+        return;
+      }
+      // Join the line AT your place in it. Routing to the register and then
+      // backing up had every joiner walk to the till, turn on their heel, and
+      // shuffle backwards — queue like a person instead.
+      const idx = this.queueIndex(e.lotId, n.eid);
+      const slot = {
+        x: line.front.x + line.back.x * idx * 0.95,
+        y: line.front.y + line.back.y * idx * 0.95,
+      };
+      const slotCell = worldToCell(g.lot, g.bdef, slot.x, slot.y);
+      const target = cellInside(g.spec, slotCell.x, slotCell.y) ? slotCell : line.cell;
+      e.stage = "till";
+      this.errandWalkTo(n, g, fixtures, target, { x: line.regMid.x, y: line.regMid.y });
+      // swap the tail for the slot itself — keeping the target cell's centre
+      // as a waypoint still grazed the register before stepping back
+      if (idx > 0 && n.workPath.length >= 2) n.workPath.splice(n.workPath.length - 2, 2, slot);
+      else if (n.workPath.length) n.workPath[n.workPath.length - 1] = slot;
+      else n.workAt = slot;
+      return;
+    }
+
+    if (e.stage === "till") {
+      const line = tillLine();
+      if (line) {
+        const q = this.tillQueue.get(e.lotId) ?? [];
+        const idx = q.indexOf(n.eid) === -1 ? this.queueIndex(e.lotId, n.eid) : q.indexOf(n.eid);
+        const slot = {
+          x: line.front.x + line.back.x * idx * 0.95,
+          y: line.front.y + line.back.y * idx * 0.95,
+        };
+        const atSlot = Math.hypot(slot.x - n.x, slot.y - n.y) < 0.3;
+        // You pay AT the register, standing at it. Reaching the head of the
+        // queue while still a slot back means walking that last stretch first
+        // — settling from wherever you stood let the whole line pay remotely
+        // and drift off without ever reaching the till.
+        if (idx > 0 || !atSlot) {
+          if (!atSlot) {
+            n.heading = null;
+            n.workAt = slot;
+            n.workPath = [];
+          } else {
+            n.heading = this.lookToward(n.x, n.y, line.regMid.x, line.regMid.y);
+          }
+          n.nextDecideAt = Date.now() + 700;
+          return;
+        }
+      }
+      this.leaveQueue(e.lotId, n.eid);
+      await this.settleErrand(n, false);
+      e.stage = "leave";
+      this.errandWalkTo(n, g, fixtures, g.door, null);
+      return;
+    }
+
+    // Leave: out the door and AWAY — a leaver who merely stops becomes a
+    // fixture in the doorway, and with a busy shop the entrance turns into a
+    // standing crowd. The stroll also clears them off the doorstep before
+    // their normal life resumes.
+    this.leaveQueue(e.lotId, n.eid);
+    n.errand = null;
+    n.heading = null;
+    this.strollSomewhere(n);
+  }
+
+  // hand over the money and feel better — the item is already in hand
+  private async settleErrand(n: Npc, restockOnFail: boolean): Promise<void> {
+    const e = n.errand;
+    if (!e || n.busy) return;
+    n.busy = true;
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await transfer(client, n.eid, e.ownerEid, e.price, "retail_sale", `${e.item} @ lot ${e.lotId}`);
+      await client.query("commit");
+      if (e.need === "food") n.food = Math.min(1, n.food + 0.6);
+      else if (e.need === "goods") n.goods = Math.min(1, n.goods + 0.6);
+    } catch (err) {
+      await client.query("rollback");
+      // can't pay: the item goes back
+      await pool
+        .query(
+          `update inventories set qty = qty + 1
+            where world_id = $1 and holder_type = 'shelf' and holder_id = $2 and item = $3`,
+          [WORLD_ID, String(e.furnId), e.item]
+        )
+        .catch(() => {});
+      const cached = this.offers.get(e.item);
+      const o = cached?.find((x) => x.lotId === e.lotId);
+      if (o) o.qty += 1;
+      if (!(err instanceof EconomyError)) console.error("[npc] purchase failed", err);
+      void restockOnFail;
+    } finally {
+      client.release();
+      n.busy = false;
+    }
   }
 
   // at the shop: pay the owner, take the item off the shelf, refill the need
@@ -1108,12 +1617,21 @@ export class NpcSim {
       try {
         await client.query("begin");
         let paid = false;
-        if (n.employerEntity !== null && n.wage > 0) {
-          // real job: employer pays, or the NPC quits over missed wages
+        // A hire with no job or no posting is paused, not payrolled: the wage
+        // only runs while they're actually working. Idle staff fall back to
+        // the city floor below, same as the unemployed, so they don't starve
+        // waiting to be posted.
+        const working = n.jobRole !== null && (n.jobRole === "hauler" || n.employerLot !== null);
+        if (n.employerEntity !== null && n.wage > 0 && working) {
+          // real job: employer pays, or the NPC quits over missed wages.
+          // A day spent stalled — "nothing to stock", "nothing to haul" —
+          // costs half wage, so a broken pipeline stops silently bleeding
+          // the employer dry while everyone stands around
+          const due = n.status ? Math.ceil(n.wage / 2) : n.wage;
           try {
             await transfer(
-              client, n.employerEntity, n.eid, n.wage, "wage",
-              `wage ${n.jobRole ?? "worker"}${n.employerLot !== null ? ` lot ${n.employerLot}` : ""}`
+              client, n.employerEntity, n.eid, due, "wage",
+              `wage ${n.jobRole ?? "worker"}${n.employerLot !== null ? ` lot ${n.employerLot}` : ""}${n.status ? " (idle)" : ""}`
             );
             paid = true;
           } catch (err) {

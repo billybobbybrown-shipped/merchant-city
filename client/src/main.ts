@@ -10,6 +10,7 @@ import { buildCity, derivedBuildings, restyleDerived } from "./game/city.js";
 import * as THREE from "three";
 import { PlayerRenderer } from "./game/players.js";
 import { CharacterPanel } from "./ui/characterPanel.js";
+import { WorkerLabels } from "./ui/workerLabels.js";
 import { Controls } from "./game/input.js";
 import { Lots } from "./game/lots.js";
 import { Constructions } from "./game/constructions.js";
@@ -391,12 +392,14 @@ async function boot() {
     () =>
       [...lots.state.entries()]
         .filter(([, st]) => st.ownerType === "player" && (actingIds.has(st.ownerId ?? "") || (!!st.tenantId && actingIds.has(st.tenantId))))
-        .map(([id, st]) => {
-          const base = lotLabel(id, st);
-          // mark company-held lots so it's obvious where a worker is going
-          const holder = st.ownerId !== selfId ? ` (${st.ownerName ?? "company"})` : "";
-          return { id, name: `${base}${holder}` };
-        })
+        .map(([id, st]) => ({
+          id,
+          name: lotLabel(id, st),
+          // whose books the lot sits on — the panel scopes staffing to the
+          // employer being viewed, so a company can't be staffed onto your
+          // personal property or the other way round
+          owner: actingIds.has(st.ownerId ?? "") ? st.ownerId! : st.tenantId!,
+        }))
   );
 
   room.onMessage("workforceChanged", () => {
@@ -526,13 +529,28 @@ async function boot() {
   state.players.onRemove((_p: any, id: string) => players.remove(id));
   // players synced before the callback registered still need rendering
   state.players.forEach(addPlayer);
+  const workerLabels = new WorkerLabels(ui);
   const addNpc = (n: any, id: string) => {
     if (npcs.position(id)) return; // already rendered
     npcs.add(id, n.name, n.appearance, n.x, n.y);
-    n.onChange(() => npcs.setDest(id, n.x, n.y));
+    const applyHeading = () => {
+      npcs.setIdleHeading(id, n.heading !== undefined && n.heading < 900 ? n.heading : null);
+      workerLabels.set(id, n.status && n.employer && actingIds.has(n.employer) ? n.status : "");
+    };
+    // onChange only fires on CHANGES — a cashier who took her post an hour ago
+    // never changes heading again, so a fresh client must read it on arrival
+    // or every standing worker renders at rotation zero, staring at a wall
+    applyHeading();
+    n.onChange(() => {
+      npcs.setDest(id, n.x, n.y);
+      applyHeading();
+    });
   };
   state.npcs.onAdd(addNpc);
-  state.npcs.onRemove((_n: any, id: string) => npcs.remove(id));
+  state.npcs.onRemove((_n: any, id: string) => {
+    npcs.remove(id);
+    workerLabels.remove(id);
+  });
   // entries synced before the callback registered still need rendering
   state.npcs.forEach(addNpc);
   if (import.meta.env.DEV) (window as any).__npcdbg = { npcs, players, state, engine, sessionId: room.sessionId }; // dev probe only
@@ -620,6 +638,13 @@ async function boot() {
   let tickAcc = 0;
   engine.onFrame((dt) => {
     districtOverlay.update(engine.camera);
+    // whoever's inside the open interior stands on its floor slab, not the
+    // world ground 12cm below it
+    const rect = interior.openRect;
+    state.npcs.forEach((n: any, id: string) => {
+      const inside = rect && n.x >= rect.x0 && n.x <= rect.x1 && n.y >= rect.z0 && n.y <= rect.z1;
+      npcs.elevate(id, inside ? rect.y : 0);
+    });
     npcs.update(dt, engine.camera, engine.target, 110);
     controls.update(dt);
     players.update(dt, engine.camera);
@@ -631,6 +656,22 @@ async function boot() {
       constructions.tick(); // finishes scaffolding when build timers elapse
     }
   });
+
+  // after the camera settles each frame, pin the labels to it — projecting in
+  // onFrame used the previous frame's camera and made the chips swim
+  engine.onAfterCamera(() =>
+    workerLabels.update(engine.camera, engine.target, (id) => npcs.position(id), (id) => npcs.elevationOf(id), (x, z) => {
+      // a worker inside a building keeps their label private to that interior
+      const rect = interior.openRect;
+      if (rect && x >= rect.x0 && x <= rect.x1 && z >= rect.z0 && z <= rect.z1) return false;
+      const lot = lots.lotAtWorld(x, z);
+      if (!lot) return false;
+      // a lot running a farm or mine has no enclosing building — its workers
+      // stand in the open even where the city generator once drew a building
+      if (lots.state.get(lot.id)?.source) return false;
+      return !!buildingDefFor(lot.id);
+    })
+  );
 
   done();
   engine.start();

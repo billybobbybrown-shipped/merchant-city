@@ -21,6 +21,14 @@ interface SeedDef {
   tier: "small" | "mid" | "large";
   // payout policy: 0 = growth company, reinvests everything
   dividend: number;
+  // The production arm: machines to own, raw inputs to buy on the exchange,
+  // and the recipe ladder from raws to the product, in dependency order. A
+  // company without one lives off the market alone.
+  chain?: {
+    machines: string[];
+    inputs: Array<{ item: string; min: number; batch: number }>;
+    ladder: Array<[string, number]>;
+  };
 }
 
 // Share counts vary, but stay banded by company size, so a bigger company
@@ -42,17 +50,48 @@ const pick = (band: readonly [number, number]) =>
 // from the same books as everyone else's. The two mining names idle until the
 // crypto phase gives them their industry.
 const SEEDS: SeedDef[] = [
+  // dividend = TARGET ANNUAL YIELD on the share price (real-world numbers:
+  // staples 3-5%, tobacco 6-7%, industrials ~1%);
   // established names pay real dividends; growth names pay nothing and are
   // valued on what they might become
-  { name: "Atlas Provisions", product: "bread", tier: "large", dividend: 0.35 },
-  { name: "Consolidated Bakeries", product: "bread", tier: "mid", dividend: 0.25 },
-  { name: "Harbor Retail Group", product: "shirt", tier: "large", dividend: 0.4 },
-  { name: "Meridian Textiles", product: "shirt", tier: "mid", dividend: 0.15 },
-  { name: "Vesper Electronics", product: "phone", tier: "mid", dividend: 0 },
-  { name: "Crestfield Spirits", product: "beer", permit: "liquor", tier: "small", dividend: 0.3 },
-  { name: "Bluebird Tobacco Co", product: "cigarettes", permit: "tobacco", tier: "small", dividend: 0.5 },
-  { name: "Ironline Provisions", product: "carrots", tier: "small", dividend: 0 },
-  { name: "Nordvik Mining Systems", product: null, tier: "mid", dividend: 0.1 },
+  {
+    name: "Atlas Provisions", product: "bread", tier: "large", dividend: 0.045,
+    chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 12, batch: 30 }], ladder: [["flour", 3], ["bread", 4]] },
+  },
+  {
+    name: "Consolidated Bakeries", product: "bread", tier: "mid", dividend: 0.025,
+    chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 10, batch: 24 }], ladder: [["flour", 3], ["bread", 3]] },
+  },
+  {
+    name: "Harbor Retail Group", product: "shirt", tier: "large", dividend: 0.035,
+    chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 12, batch: 30 }], ladder: [["fabric", 3], ["shirt", 3]] },
+  },
+  {
+    name: "Meridian Textiles", product: "shirt", tier: "mid", dividend: 0.015,
+    chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 10, batch: 24 }], ladder: [["fabric", 3], ["shirt", 3]] },
+  },
+  {
+    name: "Vesper Electronics", product: "phone", tier: "mid", dividend: 0,
+    chain: {
+      machines: ["rack_l", "smelter", "fabricator", "electronics_bench"],
+      inputs: [{ item: "stone", min: 20, batch: 40 }, { item: "iron_ore", min: 16, batch: 30 }],
+      ladder: [["iron", 3], ["silicon_ingot", 2], ["wiring", 4], ["silicon", 1], ["capacitor", 2], ["transistor", 1], ["circuit_board", 2], ["phone", 2]],
+    },
+  },
+  {
+    name: "Crestfield Spirits", product: "beer", permit: "liquor", tier: "small", dividend: 0.035,
+    chain: { machines: ["rack_l", "brewery"], inputs: [{ item: "wheat", min: 10, batch: 24 }], ladder: [["beer", 3]] },
+  },
+  {
+    name: "Bluebird Tobacco Co", product: "cigarettes", permit: "tobacco", tier: "small", dividend: 0.065,
+    chain: { machines: ["rack_l", "curing_barn"], inputs: [{ item: "tobacco", min: 10, batch: 24 }], ladder: [["cured_tobacco", 2], ["cigarettes", 3]] },
+  },
+  {
+    name: "Ironline Provisions", product: "carrots", tier: "small", dividend: 0,
+    // a pure retailer: no works, but goods still need somewhere to sit
+    chain: { machines: ["rack_l"], inputs: [], ladder: [] },
+  },
+  { name: "Nordvik Mining Systems", product: null, tier: "mid", dividend: 0.01 },
   { name: "HashWorks Mining", product: null, tier: "large", dividend: 0 },
 ];
 
@@ -106,8 +145,10 @@ export class CompanyOps {
         const profile = TIERS[seed.tier];
         const capital = pick(profile.capital);
         await credit(client, companyEid, capital, "transfer", "genesis capital");
-        // growth names carry a richer multiple; income names trade nearer book
-        const multiple = seed.dividend === 0 ? 1.5 + Math.random() * 0.6 : 1.05 + Math.random() * 0.45;
+        // list AT fair value — the mark engine values a young company at its
+        // assets, so any listing premium is just a scripted crash back to
+        // book. A whisker of variance keeps IPO prices from looking minted.
+        const multiple = 0.98 + Math.random() * 0.1;
         const valuation = capital * multiple;
         const shares = choose(profile.shares);
         const ipoPrice = Math.max(0.25, Math.round((valuation / shares) * 100) / 100);
@@ -170,7 +211,11 @@ export class CompanyOps {
   // the exchange at a premium, so no production chain can deadlock waiting for
   // a supplier. Players undercut the city to win that business.
   async cityIndustrialSupply(): Promise<void> {
-    const STAPLES = ["iron", "planks", "bricks", "fuel", "iron_ore", "wood", "stone"];
+    // Industrial staples plus the farm raws the listed companies live on. The
+    // city sells at DOUBLE base — a supplier of last resort, never the best
+    // one — so any player selling their own crop or ore undercuts it and the
+    // companies' standing bids become real demand for player production.
+    const STAPLES = ["iron", "planks", "bricks", "fuel", "iron_ore", "wood", "stone", "wheat", "cotton", "tobacco"];
     for (const item of STAPLES) {
       const open = await pool.query(
         `select coalesce(sum(qty), 0) as q from orders
@@ -187,7 +232,9 @@ export class CompanyOps {
         [WORLD_ID, String(CITY_ENTITY), item, qty]
       );
       const px = Math.round((BASE_PRICE[item] ?? 10) * 2 * 100) / 100;
-      await this.market.place(CITY_ENTITY, "sell", item, qty, px).catch(() => {});
+      await this.market.place(CITY_ENTITY, "sell", item, qty, px).catch((e) =>
+        console.error("[city supply]", item, e?.message ?? e)
+      );
     }
   }
 
@@ -202,7 +249,7 @@ export class CompanyOps {
       const companyEid = Number(row.entity_id);
       const seed = SEEDS.find((s) => s.name === row.registered_name);
       try {
-        if (seed?.product) await this.operate(companyEid, seed.product);
+        if (seed?.product) await this.operate(companyEid, seed);
         else if (row.registered_name === "Nordvik Mining Systems") await this.operateManufacturer(companyEid);
         else if (row.registered_name === "HashWorks Mining") await this.operateMiner(companyEid);
       } catch (err) {
@@ -216,9 +263,20 @@ export class CompanyOps {
   private async operateManufacturer(companyEid: number): Promise<void> {
     const bizLot = await this.ensureBizLot(companyEid, 0.4);
     if (bizLot === null) return;
-    await this.ensureFurniture(companyEid, bizLot, "electronics_bench");
+    // benches multiply when the workshop keeps running at capacity — the
+    // component supply grows with the mining industry it feeds
+    const benchFurn = await this.interiors.items(bizLot);
+    let benches = Math.max(1, benchFurn.filter((f) => f.item === "electronics_bench").length);
+    const queuedNow = Number(
+      (await pool.query("select count(*) as n from crafts where lot_id = $1", [bizLot])).rows[0].n
+    );
+    if (queuedNow >= benches * 8 && benches < 4)
+      benches = await this.ensureFurnitureCount(companyEid, bizLot, "electronics_bench", benches + 1);
+    await this.ensureFurnitureCount(companyEid, bizLot, "electronics_bench", benches);
     await this.ensureFurniture(companyEid, bizLot, "fabricator");
     await this.ensureFurniture(companyEid, bizLot, "smelter");
+    if (benches > 1)
+      await this.workforce.ensureStaffed(companyEid, bizLot, "crafter", 48, benches - 1).catch(() => {});
     await this.goods.resolveCrafts(bizLot);
 
     const balance = await this.balanceOf(companyEid);
@@ -242,9 +300,9 @@ export class CompanyOps {
       }
     }
     for (const raw of ["iron", "stone"] as const)
-      if ((store[raw] ?? 0) < 12 && balance > 400 && !(await this.hasOpenBuy(companyEid, raw)))
+      if ((store[raw] ?? 0) < 12 * benches && balance > 400 && !(await this.hasOpenBuy(companyEid, raw)))
         await this.market
-          .place(companyEid, "buy", raw, 24, Math.round((BASE_PRICE[raw] ?? 8) * 2.1 * 100) / 100)
+          .place(companyEid, "buy", raw, 24 * benches, Math.round((BASE_PRICE[raw] ?? 8) * 2.1 * 100) / 100)
           .catch(() => {});
     // haul exchange fills from the pocket into the workshop
     const pocket = await this.goods.inventory("entity", String(companyEid));
@@ -254,7 +312,7 @@ export class CompanyOps {
     // keep the product ladder running, but don't pile work on a bench that's
     // already busy — a queued craft is capital sitting idle
     const queued = await pool.query("select count(*) as n from crafts where lot_id = $1", [bizLot]);
-    if (Number(queued.rows[0].n) < 8)
+    if (Number(queued.rows[0].n) < 8 * benches)
       // in dependency order: raw -> fabricated parts -> finished components. A
       // step with nothing to work on just throws and the ladder moves on.
       for (const [recipe, batch] of [
@@ -269,7 +327,7 @@ export class CompanyOps {
         ["cooling_fan", 2],
         ["cpu_adv", 1],
       ] as const)
-        await this.goods.craft(companyEid, bizLot, recipe, batch).catch(() => {});
+        await this.goods.craft(companyEid, bizLot, recipe, batch * benches).catch(() => {});
     // list finished components: workshop -> pocket -> exchange ask
     const finished = await this.goods.inventory("lot", String(bizLot));
     for (const comp of ["cpu_basic", "cpu_adv", "psu_unit", "cooling_fan", "cooling_liquid"]) {
@@ -286,40 +344,53 @@ export class CompanyOps {
     if (!this.crypto) return;
     const bizLot = await this.ensureBizLot(companyEid, 0.4);
     if (bizLot === null) return;
-    const rackId = await this.ensureFurniture(companyEid, bizLot, "mining_rack_m");
-    if (rackId === null) return;
-
-    const rack = await this.crypto.components(rackId);
-    const have = (kind: (i: string) => boolean) => rack.components.filter((c) => kind(c.item) && c.wear < 1).length;
-    const wants: Array<[string, number]> = [
-      ["psu_unit", 2 - have((i) => i === "psu_unit")],
-      ["cooling_fan", 2 - have((i) => i.startsWith("cooling"))],
-      ["cpu_basic", 8 - have((i) => ["cpu_basic", "cpu_adv", "gpu", "asic"].includes(i))],
-    ];
-    const balance = await this.balanceOf(companyEid);
-    for (const [item, need] of wants) {
-      if (need <= 0) continue;
-      // install whatever's already on hand, then bid for the rest
-      const pocket = await this.goods.inventory("entity", String(companyEid));
-      const store = await this.goods.inventory("lot", String(bizLot));
-      let onHand = (pocket[item] ?? 0) + (store[item] ?? 0);
-      for (let i = 0; i < Math.min(need, onHand); i++)
-        await this.crypto.install(companyEid, rackId, item).catch(() => {});
-      if (onHand < need && balance > 200 && !(await this.hasOpenBuy(companyEid, item))) {
-        // pay up to the city depot's price so the rig never sits idle
-        const limit = Math.round((BASE_PRICE[item] ?? 30) * 2.1 * 100) / 100;
-        await this.market.place(companyEid, "buy", item, need - onHand, limit).catch(() => {});
-      }
+    const rackFurn = await this.interiors.items(bizLot);
+    let rackIds = rackFurn.filter((f) => f.item === "mining_rack_m").map((f) => f.id);
+    if (!rackIds.length) {
+      const id = await this.ensureFurniture(companyEid, bizLot, "mining_rack_m");
+      if (id === null) return;
+      rackIds = [id];
     }
-    // scrap dead components so slots free up
-    for (const c of rack.components) if (c.wear >= 1) await this.crypto.remove(companyEid, rackId, c.slot).catch(() => {});
+
+    const balance = await this.balanceOf(companyEid);
+    let allFull = true;
+    for (const rackId of rackIds) {
+      const rack = await this.crypto.components(rackId);
+      const have = (kind: (i: string) => boolean) => rack.components.filter((c) => kind(c.item) && c.wear < 1).length;
+      const wants: Array<[string, number]> = [
+        ["psu_unit", 2 - have((i) => i === "psu_unit")],
+        ["cooling_fan", 2 - have((i) => i.startsWith("cooling"))],
+        ["cpu_basic", 8 - have((i) => ["cpu_basic", "cpu_adv", "gpu", "asic"].includes(i))],
+      ];
+      for (const [item, need] of wants) {
+        if (need <= 0) continue;
+        allFull = false;
+        // install whatever's already on hand, then bid for the rest
+        const pocket = await this.goods.inventory("entity", String(companyEid));
+        const store = await this.goods.inventory("lot", String(bizLot));
+        let onHand = (pocket[item] ?? 0) + (store[item] ?? 0);
+        for (let i = 0; i < Math.min(need, onHand); i++)
+          await this.crypto.install(companyEid, rackId, item).catch(() => {});
+        if (onHand < need && balance > 200 && !(await this.hasOpenBuy(companyEid, item))) {
+          // pay up to the city depot's price so the rig never sits idle
+          const limit = Math.round((BASE_PRICE[item] ?? 30) * 2.1 * 100) / 100;
+          await this.market.place(companyEid, "buy", item, need - onHand, limit).catch(() => {});
+        }
+      }
+      // scrap dead components so slots free up
+      for (const c of rack.components) if (c.wear >= 1) await this.crypto.remove(companyEid, rackId, c.slot).catch(() => {});
+    }
+    // every rig fully built and running, cash on hand — the farm expands.
+    // Next ops day the new rack starts bidding for its own components.
+    if (allFull && rackIds.length < 4 && balance > 5_000)
+      await this.ensureFurnitureCount(companyEid, bizLot, "mining_rack_m", rackIds.length + 1);
     // Treasury policy: a miner runs a business, not a faucet. It sells enough
     // to cover operations, adds a steady slice of production on top, and takes
     // extra profit when the price runs hot — but it never dumps the stack.
     const coins = Math.floor(await this.crypto.balance(companyEid));
     if (coins >= 5) {
       const stats = await this.crypto.networkStats();
-      const px = stats.lastPrice ?? 2;
+      const px = stats.lastPrice ?? (await this.coinFairRef("duc"));
       const avg = await this.avgCoinPrice(60);
       const cash = await this.balanceOf(companyEid);
       const CASH_TARGET = 4_000; // runway for components, wages, rent
@@ -356,6 +427,20 @@ export class CompanyOps {
     if (!this.crypto) return 0;
     const all = await this.crypto.worldHashpower();
     return all.get(eid) ?? 0;
+  }
+
+  // pre-trade reference: what the float is worth against citizen money —
+  // the SAME anchor the market maker marks from, so the first coin trades
+  // start at fair value instead of a made-up $2
+  private async coinFairRef(code: string): Promise<number> {
+    const r = await pool.query(
+      `select (select coalesce(sum(a.balance), 0) from accounts a
+                 join npcs n on n.entity_id = a.entity_id where a.currency = 'clean') as cash,
+              (select coalesce(sum(balance), 0) from accounts where currency = $1) as supply`,
+      [code]
+    );
+    const supply = Number(r.rows[0].supply);
+    return supply > 0 ? Math.max(0.01, (Number(r.rows[0].cash) * 0.25) / supply) : 1;
   }
 
   private async avgCoinPrice(minutes: number): Promise<number | null> {
@@ -402,6 +487,31 @@ export class CompanyOps {
     return null;
   }
 
+  // place item until the building holds `count` of them; returns how many stand
+  private async ensureFurnitureCount(
+    companyEid: number,
+    lotId: number,
+    item: string,
+    count: number
+  ): Promise<number> {
+    const furn = await this.interiors.items(lotId);
+    let have = furn.filter((f) => f.item === item).length;
+    outer: while (have < count) {
+      for (let y = 1; y < 9; y++)
+        for (let x = 1; x < 9; x++) {
+          try {
+            await this.interiors.place(companyEid, lotId, item, x, y, 0);
+            have++;
+            continue outer;
+          } catch {
+            /* occupied — next cell */
+          }
+        }
+      break; // floor is full — the building caps the company's scale
+    }
+    return have;
+  }
+
   // citizen coin speculation: savers work small bids under the last price so
   // miners' asks meet real demand
   // Speculators, not allocators: some chase the recent move, some fade it.
@@ -410,7 +520,7 @@ export class CompanyOps {
   async runCoinSpeculators(): Promise<void> {
     if (!this.crypto) return;
     const stats = await this.crypto.networkStats();
-    const ref = stats.lastPrice ?? 2;
+    const ref = stats.lastPrice ?? (await this.coinFairRef("duc"));
     // recent move: latest price vs the last hour's average
     const avg = await this.avgCoinPrice(60);
     const mom = avg !== null && avg > 0 ? Math.max(-0.25, Math.min(0.25, (ref - avg) / avg)) : 0;
@@ -442,7 +552,8 @@ export class CompanyOps {
     }
   }
 
-  private async operate(companyEid: number, product: string): Promise<void> {
+  private async operate(companyEid: number, seed: SeedDef): Promise<void> {
+    const product = seed.product!;
     const balance = await this.balanceOf(companyEid);
 
     // own a storefront
@@ -483,6 +594,17 @@ export class CompanyOps {
     }
     await this.workforce.ensureStaffed(companyEid, bizLot, "cashier", 52).catch(() => {});
 
+    // The production arm: machines on the shop floor, raw inputs bid on the
+    // exchange, the recipe ladder worked in dependency order. The exchange bid
+    // for the finished product stays open below — whichever source is
+    // actually available fills the shelf, market or works.
+    let scale = 1;
+    if (seed.chain)
+      scale = await this.produce(companyEid, bizLot, seed).catch((e): number => {
+        console.error("[companyOps] produce", seed.name, e?.message ?? e);
+        return 1;
+      });
+
     // source stock on the exchange, haul, shelve, price
     const shelf = await this.goods.inventory("shelf", String(bizLot));
     const store = await this.goods.inventory("lot", String(bizLot));
@@ -490,15 +612,101 @@ export class CompanyOps {
     const base = BASE_PRICE[product] ?? 10;
     if ((pocket[product] ?? 0) > 0)
       await this.goods.transfer(companyEid, bizLot, product, pocket[product]!, true).catch(() => {});
+    // ONE working bid for the finished product, not a new one every day —
+    // the stack of duplicates was eating the company's whole order allowance,
+    // which silently starved the production arm's input bids
+    const openBids = await pool.query(
+      `select id from orders where world_id = $1 and owner_entity = $2 and item = $3
+         and side = 'buy' and asset_type = 'item' order by created_at desc`,
+      [WORLD_ID, companyEid, product]
+    );
+    for (const row of openBids.rows.slice(1))
+      await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
     const onHand = (shelf[product] ?? 0) + (store[product] ?? 0);
-    if (onHand < 12 && balance > 300) {
+    if (onHand < 12 * scale && balance > 300 && !openBids.rowCount) {
       const limit = Math.round(base * 1.3 * 100) / 100;
-      await this.market.place(companyEid, "buy", product, 10, limit).catch(() => {});
+      await this.market.place(companyEid, "buy", product, 10 * scale, limit).catch(() => {});
     }
     const inStore = (await this.goods.inventory("lot", String(bizLot)))[product] ?? 0;
     await this.goods
-      .autoRetail(companyEid, bizLot, product, retailPrice(base * 1.3), Math.min(inStore, 10))
+      .autoRetail(companyEid, bizLot, product, retailPrice(base * 1.3), Math.min(inStore, 10 * scale))
       .catch(() => {});
+  }
+
+  // the Nordvik pattern for everyone: own the machines, buy the raws, work
+  // the ladder, and let the day's craft timers do the rest. Returns the line's
+  // SCALE — how many of the final station the works runs — so retail keeps
+  // pace with production. A company that keeps selling out while its benches
+  // are saturated earns another bench, another rack, another pair of hands.
+  private async produce(companyEid: number, bizLot: number, seed: SeedDef): Promise<number> {
+    const chain = seed.chain!;
+    const primary = chain.machines[chain.machines.length - 1];
+    const furn = await this.interiors.items(bizLot);
+    let scale = Math.max(1, furn.filter((f) => f.item === primary).length);
+
+    const store = await this.goods.inventory("lot", String(bizLot));
+    const shelf = await this.goods.inventory("shelf", String(bizLot));
+    const balance = await this.balanceOf(companyEid);
+    const queued = Number(
+      (await pool.query("select count(*) as n from crafts where lot_id = $1", [bizLot])).rows[0].n
+    );
+
+    // demand outrunning capacity: the product is gone everywhere AND the
+    // benches are already full. That's the signal to expand — not a timer,
+    // not a balance check alone
+    const product = seed.product!;
+    const soldOut = (store[product] ?? 0) + (shelf[product] ?? 0) === 0;
+    if (soldOut && queued >= scale * 3 && scale < 4 && balance > 2000 && primary !== "rack_l")
+      scale = await this.ensureFurnitureCount(companyEid, bizLot, primary, scale + 1);
+
+    // the floor matches the scale: every craft station multiplied, storage
+    // racks growing more slowly (they hold goods, they don't make them)
+    for (const m of chain.machines)
+      await this.ensureFurnitureCount(
+        companyEid, bizLot, m,
+        m === "rack_l" ? Math.min(1 + (scale >> 1), 3) : scale
+      );
+    // and so does the staff: a crafter per extra bench keeps the machines
+    // visibly worked, a stocker keeps the shelves fed from the racks
+    if (primary !== "rack_l") {
+      await this.workforce.ensureStaffed(companyEid, bizLot, "stocker", 46).catch(() => {});
+      if (scale > 1)
+        await this.workforce.ensureStaffed(companyEid, bizLot, "crafter", 48, scale - 1).catch(() => {});
+    }
+    // a lapsed licence stops a permitted line dead — renew from company funds
+    if (seed.permit && !(await this.permits.has(companyEid, seed.permit)))
+      await this.permits.issue(() => true, companyEid, seed.permit).catch(() => {});
+
+    for (const inp of chain.inputs) {
+      if ((store[inp.item] ?? 0) >= inp.min * scale) continue;
+      // a bid that has sat unfilled for two game days is priced wrong — pull
+      // it (through cancel, so the escrowed cash comes home) and re-bid at
+      // the going rate instead of queueing behind itself
+      // just above the city's supplier-of-last-resort price, so the line never
+      // starves — and any player selling cheaper gets lifted first
+      const limit = Math.round((BASE_PRICE[inp.item] ?? 8) * 2.05 * 100) / 100;
+      const stale = await pool.query(
+        `select id from orders where world_id = $1 and owner_entity = $2 and item = $3
+           and side = 'buy' and asset_type = 'item'
+           and (created_at < now() - interval '20 minutes' or price < $4)`,
+        [WORLD_ID, companyEid, inp.item, limit]
+      );
+      for (const row of stale.rows) await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
+      if (balance < 500 || (await this.hasOpenBuy(companyEid, inp.item))) continue;
+      await this.market.place(companyEid, "buy", inp.item, inp.batch * scale, limit).catch((e) => console.error("[produce] bid", seed.name, inp.item, e?.message ?? e));
+    }
+    // exchange fills land in the pocket; the works run from the property
+    const pocket = await this.goods.inventory("entity", String(companyEid));
+    for (const inp of chain.inputs)
+      if ((pocket[inp.item] ?? 0) > 0)
+        await this.goods.transfer(companyEid, bizLot, inp.item, pocket[inp.item]!, true).catch(() => {});
+
+    // more benches carry a deeper queue and bigger batches — this is where
+    // the extra furniture actually turns into extra output
+    if (queued < scale * 3)
+      for (const [recipe, batch] of chain.ladder)
+        await this.goods.craft(companyEid, bizLot, recipe, batch * scale).catch((e) => { if (!String(e?.message).startsWith("needs")) console.error("[produce] craft", seed.name, recipe, e?.message ?? e); });
+    return scale;
   }
 
   // light NPC speculation so listed prices discover instead of freezing:

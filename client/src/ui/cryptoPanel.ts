@@ -1,5 +1,5 @@
 import { SERVER_URL, fmtMoney, fmtCap } from "../config.js";
-import { drawCandles, fmtPrice, Candle } from "./chart.js";
+import { drawCandles, fmtPrice, Candle, timeframeButtons, timeframeMs } from "./chart.js";
 import { estimateFill } from "./stocksPanel.js";
 import { tabStrip, wireTabs } from "./panelTabs.js";
 import { coinIcon, ic } from "./icons.js";
@@ -51,7 +51,7 @@ interface CryptoActions {
 // The crypto page: the coin's market and the mining network, in one place.
 export class CryptoPanel {
   private el: HTMLElement;
-  private res: "1m" | "10m" = "1m";
+  private res = "5m";
   private side: "buy" | "sell" = "buy";
   private tab: "market" | "mining" = "market";
   // the page opens on the listings; a coin's own market is a click away
@@ -93,7 +93,7 @@ export class CryptoPanel {
     const c = this.coinCode;
     const [coin, history, wallet, coins] = await Promise.all([
       fetch(`${SERVER_URL}/coin?c=${c}`).then((r) => r.json()).catch(() => null) as Promise<CoinData | null>,
-      fetch(`${SERVER_URL}/coin/history?res=${this.res}&c=${c}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
+      fetch(`${SERVER_URL}/market/candles?type=coin&key=${c}&res=${this.res}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
       fetch(`${SERVER_URL}/coin/balance/${this.selfEid}?c=${c}`).then((r) => r.json()).catch(() => null) as Promise<Wallet | null>,
       fetch(`${SERVER_URL}/coins`).then((r) => r.json()).catch(() => []) as Promise<CoinStats[]>,
     ]);
@@ -324,8 +324,7 @@ export class CryptoPanel {
           <b class="mkt-bigpx">${st.lastPrice !== null ? fmtPrice(st.lastPrice) : "—"}</b>
           ${chgTxt}
           <span class="mkt-header-right">
-            <button class="gd-btn mkt-res ${this.res === "1m" ? "active" : ""}" data-res="1m">1m</button>
-            <button class="gd-btn mkt-res ${this.res === "10m" ? "active" : ""}" data-res="10m">1 day</button>
+            ${timeframeButtons(this.res)}
             <button class="lp-close mkt-close">✕</button>
           </span>
         </div>
@@ -400,7 +399,8 @@ export class CryptoPanel {
     const cv = this.el.querySelector<HTMLCanvasElement>(".ex-chart");
     if (cv)
       drawCandles(cv, history, {
-        bucketMs: this.res === "1m" ? 60_000 : 600_000,
+        bucketMs: timeframeMs(this.res),
+        key: `${st.code}:${this.res}`,
         emptyText: `No ${st.name} trades yet`,
       });
 
@@ -421,7 +421,7 @@ export class CryptoPanel {
     );
     this.el.querySelectorAll<HTMLElement>(".mkt-res").forEach((b) =>
       b.addEventListener("click", () => {
-        this.res = b.dataset.res as "1m" | "10m";
+        this.res = b.dataset.res!;
         void this.refresh();
       })
     );

@@ -30,6 +30,9 @@ export interface MatchResult {
 }
 
 const MAX_OPEN_ORDERS = 20;
+// the city runs the dealer desk and the supply of last resort across every
+// market at once — a retail-sized cap would silently switch whole systems off
+const CITY_MAX_OPEN_ORDERS = 400;
 
 // Generic price-time-priority matcher over the shared orders table. Runs
 // inside its own transaction; commits on success.
@@ -54,7 +57,8 @@ export async function placeOrder(
     "select count(*) as n from orders where world_id = $1 and owner_entity = $2",
     [WORLD_ID, eid]
   );
-  if (Number(open.rows[0].n) >= MAX_OPEN_ORDERS) throw new EconomyError("too many open orders");
+  if (Number(open.rows[0].n) >= (eid === 1 ? CITY_MAX_OPEN_ORDERS : MAX_OPEN_ORDERS))
+    throw new EconomyError("too many open orders");
 
   if (side === "sell") await hooks.escrowSell(c, eid, assetKey, qty);
   else if (!market) {

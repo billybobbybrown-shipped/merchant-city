@@ -1,7 +1,15 @@
 import { itemById } from "@mc/shared";
 import { SERVER_URL, fmtMoney } from "../config.js";
 import { tabStrip, wireTabs } from "./panelTabs.js";
-import { ic } from "./icons.js";
+import { coinIcon, ic } from "./icons.js";
+
+interface CoinRow {
+  code: string;
+  name: string;
+  mined: number;
+  dailyEmission: number;
+  miners: number;
+}
 
 interface MacroRow {
   bucket: string;
@@ -33,6 +41,7 @@ const SECTOR_LABEL: Record<string, string> = {
 // derived from real recorded activity.
 export class EconomyPanel {
   private el: HTMLElement;
+  private coins: CoinRow[] = [];
   private tab: "overview" | "markets" | "goods" = "overview";
 
   constructor(ui: HTMLElement) {
@@ -59,12 +68,14 @@ export class EconomyPanel {
     this.el.style.display = "block";
     this.el.innerHTML = `<div class="fx-head"><span>The Economy</span><button class="lp-close ec-close">✕</button></div><div class="fx-body">Loading…</div>`;
     this.el.querySelector(".ec-close")?.addEventListener("click", () => this.close());
-    const [macro, indices, commodities] = await Promise.all([
+    const [macro, indices, commodities, coins] = await Promise.all([
       fetch(`${SERVER_URL}/econ/macro?days=30`).then((r) => r.json()).catch(() => []) as Promise<MacroRow[]>,
       fetch(`${SERVER_URL}/econ/indices?days=30`).then((r) => r.json()).catch(() => []),
       fetch(`${SERVER_URL}/econ/commodities`).then((r) => r.json()).catch(() => []),
+      fetch(`${SERVER_URL}/coins`).then((r) => r.json()).catch(() => []) as Promise<CoinRow[]>,
     ]);
     if (!this.visible) return;
+    this.coins = coins ?? [];
     this.render(macro, indices, commodities);
   }
 
@@ -103,10 +114,17 @@ export class EconomyPanel {
         <div class="gd-row"><span>Population</span><b>${cur.population}</b>
           <span class="sp-cap">${cur.housing_occupancy !== null ? `${(Number(cur.housing_occupancy) * 100).toFixed(0)}% housed` : ""}${cur.avg_rent !== null ? ` · rent ~${fmtMoney(Number(cur.avg_rent))}` : ""}</span></div>`;
 
-      html += `<div class="gd-cap gd-cap2">Ducat network</div>
-        <div class="gd-row"><span>Supply ${Number(cur.coin_supply).toLocaleString()}</span>
-          <span>+${Number(cur.coin_emission)}/day</span>
-          <span class="sp-cap">${Number(cur.world_hash)} world hash</span></div>`;
+      // every coin, not just the first one — the market has three
+      html += `<div class="gd-cap gd-cap2">Crypto networks</div>`;
+      html += this.coins.length
+        ? this.coins
+            .map(
+              (c) => `<div class="gd-row">${ic(coinIcon(c.code), 16)}<span>${c.name}</span>
+                <b>${c.mined.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b>
+                <span class="sp-cap">+${c.dailyEmission.toLocaleString()}/day · ${c.miners} mining</span></div>`
+            )
+            .join("")
+        : `<div class="gd-row"><span>No coin data</span></div>`;
     }
     }
 

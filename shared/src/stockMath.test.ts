@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   circuitBand,
-  dividendPerShare,
+  declaredDps,
   floatValid,
   ipoEligible,
   ipoPriceBand,
@@ -34,12 +34,20 @@ test("float bounds are 25-75%", () => {
   assert.ok(!floatValid(0.2) && !floatValid(0.8));
 });
 
-test("dividends come from real profit, capped by cash, floored per share", () => {
-  assert.equal(dividendPerShare(0.5, 1000, 10_000, 1000), 0.5);
-  assert.equal(dividendPerShare(0.5, -500, 10_000, 1000), 0, "no dividend on a loss day");
-  assert.equal(dividendPerShare(1, 1000, 300, 1000), 0.3, "cash-capped");
-  assert.equal(dividendPerShare(0, 1000, 10_000, 1000), 0);
-  assert.equal(dividendPerShare(0.25, 3312, 33_000, 100_000), 0.0082, "sub-cent per-share rates still pay");
+test("declared dividends: realistic annual yield, sticky, cash-capped", () => {
+  // 5.2% target on a $10 stock = exactly $0.01/share each weekly period
+  assert.equal(declaredDps(0.052, 10, 0, 1e9, 1000), 0.01);
+  // annualized payout lands on the target yield
+  const dps = declaredDps(0.04, 25, 0, 1e9, 1_000_000);
+  assert.ok(Math.abs((dps * 52) / 25 - 0.04) < 0.005, "≈4%/yr");
+  assert.equal(declaredDps(0, 10, 0.01, 1e9, 1000), 0, "no policy, no dividend");
+  assert.equal(declaredDps(0.05, 0, 0.01, 1e9, 1000), 0, "no price, no dividend");
+  // sticky: a price spike only lifts the rate 25% in one period
+  assert.equal(declaredDps(0.052, 30, 0.01, 1e9, 1000), 0.0125);
+  // and a crash only trims it 25%
+  assert.equal(declaredDps(0.052, 2, 0.01, 1e9, 1000), 0.0075);
+  // the period pool never exceeds 5% of cash
+  assert.equal(declaredDps(0.052, 10, 0, 100, 1000), 0.005, "cash-capped");
 });
 
 test("majority control needs strictly over half the shares", () => {

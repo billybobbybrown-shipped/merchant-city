@@ -97,6 +97,15 @@ export class PlayerRenderer {
     this.avatars.get(sessionId)?.dest.set(x, y);
   }
 
+  // a facing to settle into while standing still — the cashier turns to her
+  // customers instead of freezing at whatever angle she walked in on
+  private idleHeadings = new Map<string, number>();
+
+  setIdleHeading(sessionId: string, heading: number | null): void {
+    if (heading === null) this.idleHeadings.delete(sessionId);
+    else this.idleHeadings.set(sessionId, heading);
+  }
+
   // how far off the ground to draw someone — used when you're upstairs, since
   // the server only knows where you are on the plan, not which storey
   private elevation = new Map<string, number>();
@@ -104,6 +113,10 @@ export class PlayerRenderer {
   elevate(sessionId: string, y: number): void {
     if (y) this.elevation.set(sessionId, y);
     else this.elevation.delete(sessionId);
+  }
+
+  elevationOf(sessionId: string): number {
+    return this.elevation.get(sessionId) ?? 0;
   }
 
   position(sessionId: string): THREE.Vector2 | null {
@@ -120,6 +133,10 @@ export class PlayerRenderer {
           // far NPCs still track server position, just skip the animation work
           a.cur.x = a.dest.x;
           a.cur.y = a.dest.y;
+          // and hold their served facing, so panning onto a shop is right
+          // from the first frame instead of after an on-screen turn
+          const want = this.idleHeadings.get(sid);
+          if (want !== undefined) a.group.rotation.y = want;
           continue;
         }
       }
@@ -137,6 +154,15 @@ export class PlayerRenderer {
         // avatars are modelled facing -z (that's where the eyes are), so the
         // half turn puts their front, not their back, along the way they walk
         a.group.rotation.y = Math.atan2(dx, dy) + Math.PI;
+      }
+      if (!moving) {
+        const want = this.idleHeadings.get(sid);
+        if (want !== undefined) {
+          // turn the short way round, same as the walk facing does
+          let d = ((want - a.group.rotation.y + Math.PI) % (Math.PI * 2)) - Math.PI;
+          if (d < -Math.PI) d += Math.PI * 2;
+          a.group.rotation.y += d * Math.min(1, dt * 8);
+        }
       }
       // ease in and out of the gait rather than snapping between poses
       a.gait += ((moving ? 1 : 0) - a.gait) * Math.min(1, dt * 9);

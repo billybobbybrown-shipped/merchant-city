@@ -1,5 +1,5 @@
 import { SERVER_URL, fmtMoney, fmtCap } from "../config.js";
-import { drawCandles, fmtPrice, Candle } from "./chart.js";
+import { drawCandles, fmtPrice, Candle, timeframeButtons, timeframeMs } from "./chart.js";
 import { tabStrip, wireTabs } from "./panelTabs.js";
 
 interface StockRow {
@@ -8,6 +8,8 @@ interface StockRow {
   shares: number;
   floatShares: number;
   dividendRatio: number;
+  dps: number;
+  payInDays: number;
   prevClose: number | null;
   last: number | null;
   marketCap: number | null;
@@ -54,7 +56,7 @@ export class StocksPanel {
   private el: HTMLElement;
   private view: "list" | "detail" | "portfolio" = "list";
   private company: number | null = null;
-  private res: "1m" | "10m" = "1m";
+  private res = "5m";
   private side: "buy" | "sell" = "buy";
   private detailTab: "trade" | "about" = "trade";
 
@@ -200,7 +202,9 @@ export class StocksPanel {
           <b class="mkt-px">${s.last !== null ? fmtPrice(s.last) : "—"}</b>
           ${chgTag(chgPct(s.last, s.prevClose))}
           <span class="mkt-dim">${s.marketCap !== null ? fmtCap(s.marketCap) : ""}</span>
-          <span class="mkt-dim">${s.dividendRatio > 0 ? `${Math.round(s.dividendRatio * 100)}% div` : ""}</span>
+          <span class="mkt-dim">${
+            s.dps > 0 && s.last ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%` : s.dividendRatio > 0 ? `${(s.dividendRatio * 100).toFixed(1)}%` : ""
+          }</span>
         </div>`;
     }
 
@@ -228,7 +232,7 @@ export class StocksPanel {
         </div>
         <div class="mkt-row mkt-head-row">
           <span>Company</span><b class="mkt-px">Last</b><span class="mkt-chg">Day</span>
-          <span class="mkt-dim">Mkt cap</span><span class="mkt-dim">Payout</span>
+          <span class="mkt-dim">Mkt cap</span><span class="mkt-dim">Dividend</span>
         </div>
         <div class="mkt-list">${listHtml}</div>
         ${ordersHtml}
@@ -259,7 +263,7 @@ export class StocksPanel {
     const [rows, d, history, mine, fin] = await Promise.all([
       fetch(`${SERVER_URL}/stocks`).then((r) => r.json()).catch(() => []) as Promise<StockRow[]>,
       fetch(`${SERVER_URL}/stocks/${company}`).then((r) => r.json()).catch(() => null),
-      fetch(`${SERVER_URL}/stocks/${company}/history?res=${this.res}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
+      fetch(`${SERVER_URL}/market/candles?type=stock&key=s:${company}&res=${this.res}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
       fetch(`${SERVER_URL}/holdings/${this.selfEid}`).then((r) => r.json()).catch(() => ({ holdings: [], orders: [] })),
       fetch(`${SERVER_URL}/company/${company}/financials`).then((r) => r.json()).catch(() => null),
     ]);
@@ -286,7 +290,14 @@ export class StocksPanel {
       (o) => o.company === company
     );
     const chg = chgPct(s.last, s.prevClose);
-    const divYield = s.dividendRatio > 0 ? `${Math.round(s.dividendRatio * 100)}% of profit` : "none — growth company";
+    const divYield =
+      s.dps > 0
+        ? `${s.last ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%/yr · ` : ""}$${
+            s.dps < 0.01 ? s.dps.toFixed(4) : s.dps.toFixed(2)
+          }/sh weekly · pays in ${s.payInDays}d`
+        : s.dividendRatio > 0
+          ? `${(s.dividendRatio * 100).toFixed(1)}%/yr target — first payment pending`
+          : "none — growth company";
 
     const tape = (d.trades as Array<{ price: number; qty: number; ts: number }>)
       .slice(0, 12)
@@ -319,8 +330,7 @@ export class StocksPanel {
           ${chgTag(chg)}
           ${s.halted ? `<span class="mkt-halt">HALTED</span>` : ""}
           <span class="mkt-header-right">
-            <button class="gd-btn mkt-res ${this.res === "1m" ? "active" : ""}" data-res="1m">1m</button>
-            <button class="gd-btn mkt-res ${this.res === "10m" ? "active" : ""}" data-res="10m">1 day</button>
+            ${timeframeButtons(this.res)}
             <button class="lp-close mkt-close">✕</button>
           </span>
         </div>
@@ -330,7 +340,7 @@ export class StocksPanel {
           ${stat("Float", s.floatShares.toLocaleString())}
           ${stat("Prev close", s.prevClose !== null ? fmtPrice(s.prevClose) : "—")}
           ${stat("P/E", pe)}
-          ${stat("Payout", s.dividendRatio > 0 ? `${Math.round(s.dividendRatio * 100)}%` : "none")}
+          ${stat("Dividend", s.dividendRatio > 0 ? `${(s.dividendRatio * 100).toFixed(1)}%` : "none")}
           ${held > 0 ? stat("You hold", held.toLocaleString()) : ""}
         </div>
         <canvas class="ex-chart"></canvas>
@@ -377,7 +387,7 @@ export class StocksPanel {
       </div>`;
 
     const cv = this.el.querySelector<HTMLCanvasElement>(".ex-chart");
-    if (cv) drawCandles(cv, history, { bucketMs: this.res === "1m" ? 60_000 : 600_000 });
+    if (cv) drawCandles(cv, history, { bucketMs: timeframeMs(this.res), key: `s:${company}:${this.res}` });
 
     wireTabs(this.el, (k) => {
       this.detailTab = k as "trade" | "about";
@@ -390,7 +400,7 @@ export class StocksPanel {
     });
     this.el.querySelectorAll<HTMLElement>(".mkt-res").forEach((b) =>
       b.addEventListener("click", () => {
-        this.res = b.dataset.res as "1m" | "10m";
+        this.res = b.dataset.res!;
         void this.refresh();
       })
     );

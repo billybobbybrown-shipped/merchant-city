@@ -22,6 +22,9 @@ import { ic } from "../ui/icons.js";
 const FACING_ROT = [0, Math.PI, Math.PI / 2, -Math.PI / 2];
 // matches the storey height the exterior is built from
 const FLOOR_H = 2.6;
+// the slab's top surface sits this far above the storey base — everything that
+// stands ON the floor (you included) stands here, not at the base
+const FLOOR_TOP = 0.12;
 
 interface Net {
   place(lotId: number, item: string, x: number, y: number, rot: number, floor: number): void;
@@ -118,6 +121,19 @@ export class InteriorMode {
     });
   }
 
+  // world-space rect of the open interior, for lifting whoever's inside onto
+  // the storey surface with you (null when no interior is open)
+  get openRect(): { x0: number; z0: number; x1: number; z1: number; y: number } | null {
+    if (!this.lot || !this.active) return null;
+    return {
+      x0: this.lot.x * TS,
+      z0: this.lot.y * TS,
+      x1: (this.lot.x + this.lot.w) * TS,
+      z1: (this.lot.y + this.lot.h) * TS,
+      y: FLOOR_TOP + this.floor * FLOOR_H,
+    };
+  }
+
   get active() {
     return this.lotId !== null;
   }
@@ -148,7 +164,7 @@ export class InteriorMode {
     if (this.hiddenBuilding) this.hiddenBuilding.visible = false;
 
     this.buildScene();
-    this.net.elevate(0);
+    this.net.elevate(FLOOR_TOP);
     this.mode = "interact";
     this.buildBar();
   }
@@ -165,7 +181,7 @@ export class InteriorMode {
     this.buildScene();
     // the camera and your character both climb with you
     this.engine.target.y = this.floor * FLOOR_H;
-    this.net.elevate(this.floor * FLOOR_H);
+    this.net.elevate(FLOOR_TOP + this.floor * FLOOR_H);
     this.refreshGhost();
     this.buildBar();
   }

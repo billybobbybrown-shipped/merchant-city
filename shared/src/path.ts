@@ -32,6 +32,73 @@ export function nearestWalkable(
 // 4-directional A* with an expansion cap. Returns tile waypoints (excluding
 // the start), or null when unreachable within the budget. Start/goal snap to
 // the nearest walkable tile.
+
+// Connected components of the walkable grid, labelled once per map. Component
+// 1 is the mainland — the street network nearly every tile belongs to; the
+// rest are enclosed courtyards.
+const compCache = new WeakMap<CityMap, { labels: Int32Array; main: number }>();
+function componentsOf(map: CityMap): { labels: Int32Array; main: number } {
+  const hit = compCache.get(map);
+  if (hit) return hit;
+  const W = map.width;
+  const H = map.height;
+  const labels = new Int32Array(W * H);
+  const sizes: number[] = [0];
+  let next = 0;
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const k = y * W + x;
+      if (labels[k] || !tileWalkable(map.tiles[k] as Tile)) continue;
+      next++;
+      sizes[next] = 0;
+      const q = [k];
+      labels[k] = next;
+      while (q.length) {
+        const c = q.pop()!;
+        sizes[next]++;
+        const cx = c % W;
+        const cy = (c / W) | 0;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          const nk = ny * W + nx;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          if (labels[nk] || !tileWalkable(map.tiles[nk] as Tile)) continue;
+          labels[nk] = next;
+          q.push(nk);
+        }
+      }
+    }
+  let main = 1;
+  for (let i = 2; i <= next; i++) if (sizes[i] > sizes[main]) main = i;
+  const out = { labels, main };
+  compCache.set(map, out);
+  return out;
+}
+
+// a point on a minor component moves to the nearest mainland tile
+function toMainland(
+  map: CityMap,
+  p: { x: number; y: number } | null
+): { x: number; y: number } | null {
+  if (!p) return null;
+  const { labels, main } = componentsOf(map);
+  const W = map.width;
+  if (labels[p.y * W + p.x] === main) return p;
+  let best: { x: number; y: number } | null = null;
+  let bestD = Infinity;
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < W; x++) {
+      if (labels[y * W + x] !== main) continue;
+      const d = (x - p.x) * (x - p.x) + (y - p.y) * (y - p.y);
+      if (d < bestD) {
+        bestD = d;
+        best = { x, y };
+      }
+    }
+  return best;
+}
+
 export function findPath(
   map: CityMap,
   sx: number,
@@ -44,8 +111,12 @@ export function findPath(
   const H = map.height;
   const inb = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H;
   const walk = (x: number, y: number) => inb(x, y) && tileWalkable(map.tiles[y * W + x] as Tile);
-  const s0 = nearestWalkable(map, sx, sy);
-  const g0 = nearestWalkable(map, gx, gy);
+  // Homes and shops sit deep in lot tiles; some resolve into walkable POCKETS —
+  // courtyards sealed off by buildings — rather than the street network. A
+  // pocket endpoint gets snapped to the mainland instead, so no walk is ever
+  // impossible: a stranded walker steps out through the block once and is free.
+  const s0 = toMainland(map, nearestWalkable(map, sx, sy, 10));
+  const g0 = toMainland(map, nearestWalkable(map, gx, gy, 10));
   if (!s0 || !g0) return null;
   sx = s0.x;
   sy = s0.y;

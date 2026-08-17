@@ -131,6 +131,14 @@ export class Engine {
     this.frameCbs.push(cb);
   }
 
+  // runs after the camera has moved for this frame — anything that projects
+  // world points to the screen (DOM labels) must use THIS camera, not last
+  // frame's, or it visibly swims during pans
+  private afterCameraCbs: Array<() => void> = [];
+  onAfterCamera(cb: () => void) {
+    this.afterCameraCbs.push(cb);
+  }
+
   start() {
     this.renderer.setAnimationLoop(() => {
       const dt = Math.min(this.clock.getDelta(), 0.1);
@@ -138,6 +146,10 @@ export class Engine {
       this.yaw += (this.targetYaw - this.yaw) * Math.min(1, dt * 10);
       for (const cb of this.frameCbs) cb(dt);
       this.updateCamera();
+      // fresh matrices before anyone projects with this camera
+      this.camera.updateMatrixWorld(true);
+      this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
+      for (const cb of this.afterCameraCbs) cb();
       this.updateDayNight();
       if (this.usePost) this.composer.render();
       else this.renderer.render(this.scene, this.camera);

@@ -602,6 +602,19 @@ export class LotStore {
             "delete from dock_lines where world_id = $1 and (lot_id = $2 or partner_lot = $2)",
             [WORLD_ID, lotId]
           );
+          // the bay's goods go home with the demolisher — see interiors.remove
+          await client.query(
+            `insert into inventories (world_id, holder_type, holder_id, item, qty)
+             select world_id, 'entity', $2, item, qty from inventories
+              where world_id = $1 and holder_type = 'dock' and holder_id = $3
+             on conflict (world_id, holder_type, holder_id, item)
+               do update set qty = inventories.qty + excluded.qty`,
+            [WORLD_ID, String(eid), String(lotId)]
+          );
+          await client.query(
+            "delete from inventories where world_id = $1 and holder_type = 'dock' and holder_id = $2",
+            [WORLD_ID, String(lotId)]
+          );
           removed.push("delivery space");
         }
       }

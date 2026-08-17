@@ -73,7 +73,9 @@ async function main() {
   const stats = new StatsService(lotStore, stocks, crypto);
   companyOps.stats = stats;
   const marketMakers = new MarketMakers(stocks, crypto);
-  setInterval(() => void marketMakers.tick(), 25_000);
+  // a 10s heartbeat gives the mark series real resolution — one candle
+  // even at 1m is built from six live marks
+  setInterval(() => void marketMakers.tick(), 10_000);
   const npcSim = new NpcSim(world.map, lotStore);
   npcSim.workforce = workforce;
   npcSim.goods = goods;
@@ -132,6 +134,55 @@ async function main() {
     );
     res.json(r.rows.map((row) => ({ id: row.id, name: row.name, control: row.control ?? null })));
   });
+  // Candles for stocks and coins at any timeframe, built from the continuous
+  // mark series (so quiet periods still have real candles) with trade volume
+  // and trade extremes merged in.
+  const CANDLE_RES: Record<string, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
+  app.get("/market/candles", async (req, res) => {
+    const assetType = String(req.query.type ?? "");
+    const key = String(req.query.key ?? "");
+    const sec = CANDLE_RES[String(req.query.res ?? "5m")] ?? 300;
+    if (!["stock", "coin"].includes(assetType) || !key) return res.status(400).json({ error: "bad request" });
+    const span = Math.min(7 * 86400, sec * 900);
+    const r = await pool.query(
+      `with marks as (
+         select floor(extract(epoch from ts) / $4) as b,
+                (array_agg(price order by ts asc))[1] as o,
+                (array_agg(price order by ts desc))[1] as c,
+                max(price) as h, min(price) as l
+           from price_marks
+          where world_id = $1 and asset_type = $2 and item = $3
+            and ts > now() - make_interval(secs => $5)
+          group by 1
+       ), vols as (
+         select floor(extract(epoch from ts) / $4) as b,
+                sum(qty) as v, max(price) as th, min(price) as tl
+           from trades
+          where world_id = $1 and asset_type = $2 and item = $3
+            and ts > now() - make_interval(secs => $5)
+          group by 1
+       )
+       select coalesce(m.b, v.b) as b,
+              coalesce(m.o, v.th) as o, coalesce(m.c, v.tl) as c,
+              greatest(coalesce(m.h, 0), coalesce(v.th, 0)) as h,
+              least(coalesce(m.l, 1e12), coalesce(v.tl, 1e12)) as l,
+              coalesce(v.v, 0) as v
+         from marks m full outer join vols v using (b)
+        order by 1`,
+      [1, assetType, key, sec, span]
+    );
+    res.json(
+      r.rows.map((row) => ({
+        t: Number(row.b) * sec * 1000,
+        o: Number(row.o),
+        h: Number(row.h),
+        l: Number(row.l),
+        c: Number(row.c),
+        v: Number(row.v),
+      }))
+    );
+  });
+
   app.get("/market", async (_req, res) => res.json(await market.summary()));
   app.get("/market/orders", async (req, res) => {
     const uid = await bearerUid(req);

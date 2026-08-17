@@ -41,13 +41,30 @@ export function floatValid(pct: number): boolean {
   return pct >= IPO_FLOAT_MIN && pct <= IPO_FLOAT_MAX;
 }
 
-// daily dividend pool: payout ratio applied to the day's net profit (never
-// negative), capped by cash on hand; distributed per share. Per-share rate
-// keeps 4 decimals so wide floats still pay — each holder's total rounds to cents.
-export function dividendPerShare(ratio: number, dayProfit: number, cash: number, sharesOutstanding: number): number {
-  const pool = Math.min(Math.max(0, dayProfit) * ratio, cash);
-  if (pool <= 0 || sharesOutstanding <= 0) return 0;
-  return Math.floor((pool / sharesOutstanding) * 10_000) / 10_000;
+// Dividends are a DECLARED policy sized like the real thing: the ratio is a
+// TARGET ANNUAL YIELD on the share price (income names run 1-7%; growth names
+// pay nothing), paid in weekly installments — 52 periods to a game year. Like
+// a real board the rate moves gradually, at most ±25% per period, and the
+// payout pool never exceeds 5% of cash on hand per period, so a dividend can
+// run for years off retained earnings but can't bleed a company dry. Per-share
+// rate keeps 6 decimals — flooring sub-penny rates at 4 shaved a low-yield
+// name visibly under its target — and each holder's total rounds to cents.
+export const DIVIDEND_PERIOD_DAYS = 7;
+export const DIVIDEND_PERIODS_PER_YEAR = 52;
+export function declaredDps(
+  yieldAnnual: number,
+  price: number,
+  prevDps: number,
+  cash: number,
+  sharesOutstanding: number
+): number {
+  if (sharesOutstanding <= 0 || yieldAnnual <= 0 || price <= 0) return 0;
+  const target = (price * yieldAnnual) / DIVIDEND_PERIODS_PER_YEAR;
+  let dps =
+    prevDps > 0 ? Math.min(Math.max(target, prevDps * 0.75), prevDps * 1.25) : target;
+  const pool = Math.min(dps * sharesOutstanding, Math.max(0, cash) * 0.05);
+  dps = pool / sharesOutstanding;
+  return Math.round(dps * 1_000_000) / 1_000_000;
 }
 
 // >50% of shares outstanding controls a listed company (hostile takeovers

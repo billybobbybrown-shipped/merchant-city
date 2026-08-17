@@ -169,8 +169,24 @@ export class InteriorStore {
           "select 1 from furniture where world_id = $1 and lot_id = $2 and item = 'delivery_space' limit 1",
           [WORLD_ID, lotId]
         );
-        if (!others.rowCount)
+        if (!others.rowCount) {
           await client.query("delete from docks where lot_id = $1 and indoor = true", [lotId]);
+          // whatever the bay held goes home with you — dock storage is keyed
+          // by LOT, and rows left behind would surface in whoever builds the
+          // next bay here, even after the lot changes hands
+          await client.query(
+            `insert into inventories (world_id, holder_type, holder_id, item, qty)
+             select world_id, 'entity', $2, item, qty from inventories
+              where world_id = $1 and holder_type = 'dock' and holder_id = $3
+             on conflict (world_id, holder_type, holder_id, item)
+               do update set qty = inventories.qty + excluded.qty`,
+            [WORLD_ID, String(eid), String(lotId)]
+          );
+          await client.query(
+            "delete from inventories where world_id = $1 and holder_type = 'dock' and holder_id = $2",
+            [WORLD_ID, String(lotId)]
+          );
+        }
       }
       // the fixture goes back into the property's storage as the item it is
       await this.goods.putIntoProperty(lotId, target.item, 1, client);
