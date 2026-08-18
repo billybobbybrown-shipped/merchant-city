@@ -1,8 +1,9 @@
 import { SERVER_URL, fmtMoney, fmtCap } from "../config.js";
 import { drawCandles, fmtPrice, Candle, timeframeButtons, timeframeMs } from "./chart.js";
-import { estimateFill } from "./stocksPanel.js";
+import { estimateFill, bookLadder, windowStats } from "./stocksPanel.js";
 import { tabStrip, wireTabs } from "./panelTabs.js";
 import { coinIcon, ic } from "./icons.js";
+import { COIN_DESC } from "./marketMeta.js";
 
 interface CoinData {
   bids: Array<{ price: number; qty: number }>;
@@ -44,7 +45,7 @@ interface Wallet {
 }
 
 interface CryptoActions {
-  trade(side: "buy" | "sell", qty: number, coin: string): void;
+  trade(side: "buy" | "sell", qty: number, coin: string, price?: number): void;
   cancel(orderId: number): void;
 }
 
@@ -53,6 +54,7 @@ export class CryptoPanel {
   private el: HTMLElement;
   private res = "5m";
   private side: "buy" | "sell" = "buy";
+  private mode: "market" | "limit" = "market";
   private tab: "market" | "mining" = "market";
   // the page opens on the listings; a coin's own market is a click away
   private view: "list" | "detail" | "portfolio" = "list";
@@ -91,18 +93,19 @@ export class CryptoPanel {
     if (this.view === "portfolio") return this.renderPortfolio();
     if (this.view === "list") return this.renderList();
     const c = this.coinCode;
-    const [coin, history, wallet, coins] = await Promise.all([
+    const [coin, history, oneMin, wallet, coins] = await Promise.all([
       fetch(`${SERVER_URL}/coin?c=${c}`).then((r) => r.json()).catch(() => null) as Promise<CoinData | null>,
       fetch(`${SERVER_URL}/market/candles?type=coin&key=${c}&res=${this.res}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
+      fetch(`${SERVER_URL}/market/candles?type=coin&key=${c}&res=1m`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
       fetch(`${SERVER_URL}/coin/balance/${this.selfEid}?c=${c}`).then((r) => r.json()).catch(() => null) as Promise<Wallet | null>,
       fetch(`${SERVER_URL}/coins`).then((r) => r.json()).catch(() => []) as Promise<CoinStats[]>,
     ]);
     this.coins = coins ?? [];
     if (!this.visible || !coin) return;
-    this.render(coin, history, wallet ?? { balance: 0, orders: [], myHash: 0, hashShare: 0 });
+    this.render(coin, history, oneMin, wallet ?? { balance: 0, orders: [], myHash: 0, hashShare: 0 });
   }
 
-// ---------- portfolio ----------
+  // ---------- portfolio ----------
   // What you hold, what it cost, and what it has made you. Mined coins arrive
   // free, so they pull the average cost down rather than counting as a purchase.
 
@@ -138,7 +141,7 @@ export class CryptoPanel {
       .sort((a, b) => b.value - a.value)
       .map(
         (r) => `<div class="mkt-row pf-row" data-c="${r.code}">
-            <span class="mkt-name">${ic(coinIcon(r.code), 20)} ${r.name}
+            <span class="mkt-name">${ic(coinIcon(r.code), 20)} <span class="mkt-symtag">${r.code.toUpperCase()}</span>${r.name}
               <span class="mkt-sub">${r.held.toLocaleString()} @ ${fmtPrice(r.avgCost)}${
                 r.mined > 0 ? ` · ${r.mined.toLocaleString()} mined` : ""
               }</span></span>
@@ -218,7 +221,7 @@ export class CryptoPanel {
             : `<span class="mkt-chg ${chg >= 0 ? "mkt-up" : "mkt-down"}">${chg >= 0 ? "▲" : "▼"} ${Math.abs(chg).toFixed(1)}%</span>`;
         const mine = held[c.code] ?? 0;
         return `<div class="mkt-row" data-c="${c.code}">
-            <span class="mkt-name">${ic(coinIcon(c.code), 20)} ${c.name}
+            <span class="mkt-name">${ic(coinIcon(c.code), 20)} <span class="mkt-symtag">${c.code.toUpperCase()}</span>${c.name}
               ${mine > 0 ? `<span class="mkt-sub">${mine.toLocaleString()} held</span>` : ""}</span>
             <b class="mkt-px">${c.lastPrice !== null ? fmtPrice(c.lastPrice) : "—"}</b>
             ${chgHtml}
@@ -277,26 +280,17 @@ export class CryptoPanel {
     );
   }
 
-  private render(coin: CoinData, history: Candle[], wallet: Wallet) {
+  private render(coin: CoinData, history: Candle[], oneMin: Candle[], wallet: Wallet) {
     const st = coin.stats;
-    // day change from candle closes
+    // gain/loss and volume over the chart's own timeframe
+    const day = windowStats(oneMin, timeframeMs(this.res));
     let chgTxt = `<span class="mkt-chg mkt-flat">—</span>`;
-    if (history.length >= 2) {
-      const dayAgo = history.find((c) => c.t >= Date.now() - 600_000 * 1.5) ?? history[0];
-      const last = history[history.length - 1].c;
-      if (dayAgo.o > 0) {
-        const chg = ((last - dayAgo.o) / dayAgo.o) * 100;
-        chgTxt = `<span class="mkt-chg ${chg >= 0 ? "mkt-up" : "mkt-down"}">${chg >= 0 ? "▲" : "▼"} ${Math.abs(chg).toFixed(1)}%</span>`;
-      }
+    let chgUp = true;
+    if (st.lastPrice !== null && day.ref !== null && day.ref > 0) {
+      const chg = ((st.lastPrice - day.ref) / day.ref) * 100;
+      chgUp = chg >= 0;
+      chgTxt = `<span class="mkt-chg ${chg >= 0 ? "mkt-up" : "mkt-down"}">${chg >= 0 ? "▲" : "▼"} ${Math.abs(chg).toFixed(1)}%</span>`;
     }
-
-    const tape = coin.trades
-      .slice(0, 12)
-      .map(
-        (t) => `<div class="mkt-tape"><span class="mkt-dim">${new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          <span>${fmtPrice(t.price)}</span><b>${t.qty.toLocaleString()}</b></div>`
-      )
-      .join("");
 
     const mineHtml = wallet.orders.length
       ? wallet.orders
@@ -309,8 +303,8 @@ export class CryptoPanel {
           .join("")
       : `<div class="mkt-empty">No open orders</div>`;
 
-    const stat = (label: string, value: string) =>
-      `<div class="mkt-stat"><span>${label}</span><b>${value}</b></div>`;
+    const stat = (label: string, value: string, tone = "") =>
+      `<div class="mkt-stat"><span>${label}</span><b class="${tone}">${value}</b></div>`;
     const est =
       st.worldHash > 0 && wallet.myHash > 0
         ? (st.dailyEmission * wallet.myHash) / st.worldHash
@@ -319,10 +313,11 @@ export class CryptoPanel {
     this.el.innerHTML = `
       <div class="ex-detail">
         <div class="mkt-header">
-          <button class="gd-btn mkt-back">‹ Coins</button>
-          <span class="mkt-title">${ic(coinIcon(st.code), 20)} ${st.name}</span>
-          <b class="mkt-bigpx">${st.lastPrice !== null ? fmtPrice(st.lastPrice) : "—"}</b>
-          ${chgTxt}
+          <button class="gd-btn mkt-back">‹</button>
+          <span class="mkt-symbox">
+            <span class="mkt-symline">${ic(coinIcon(st.code), 18)}<span class="mkt-sym">${st.code.toUpperCase()}</span><span class="mkt-sector">Crypto</span></span>
+            <span class="mkt-fullname">${st.name}</span>
+          </span>
           <span class="mkt-header-right">
             ${timeframeButtons(this.res)}
             <button class="lp-close mkt-close">✕</button>
@@ -332,17 +327,14 @@ export class CryptoPanel {
         <div class="mkt-statbar">
           ${
             this.tab === "market"
-              ? `${stat("Total supply", st.maxSupply.toLocaleString())}
-                 ${stat("In circulation", st.mined.toLocaleString(undefined, { maximumFractionDigits: 0 }))}
-                 ${stat(
-                   "Market cap",
-                   st.lastPrice !== null ? fmtCap(st.lastPrice * st.mined) : "—"
-                 )}
-                 ${stat(
-                   "Fully diluted",
-                   st.lastPrice !== null ? fmtCap(st.lastPrice * st.maxSupply) : "—"
-                 )}
-                 ${stat("Your wallet", `${wallet.balance.toLocaleString()} ${st.symbol}`)}
+              ? `<div class="mkt-stat mkt-stat-px"><span>Price</span>
+                   <b class="${chgUp ? "mkt-up" : "mkt-down"}">${st.lastPrice !== null ? fmtPrice(st.lastPrice) : "—"}</b>
+                   ${chgTxt}
+                 </div>
+                 ${stat("Volume", day.vol > 0 ? fmtCap(Math.round(day.vol)) : "—")}
+                 ${stat("Mkt cap", st.lastPrice !== null ? fmtCap(st.lastPrice * st.mined) : "—")}
+                 ${stat("Circulating", st.mined.toLocaleString(undefined, { maximumFractionDigits: 0 }))}
+                 ${stat("Wallet", `${wallet.balance.toLocaleString()} ${st.symbol}`, wallet.balance > 0 ? "mkt-gold" : "")}
                  ${
                    wallet.balance > 0 && st.lastPrice !== null
                      ? stat("Worth", fmtMoney(wallet.balance * st.lastPrice))
@@ -358,22 +350,27 @@ export class CryptoPanel {
         <canvas class="ex-chart" ${this.tab === "market" ? "" : 'style="display:none"'}></canvas>
         <div class="mkt-cols" ${this.tab === "market" ? "" : 'style="display:none"'}>
           <div class="mkt-col mkt-trade-col">
-            <div class="mkt-section">Trade</div>
             <div class="mkt-sides">
               <button class="mkt-side ${this.side === "buy" ? "mkt-side-buy" : ""}" data-side="buy">Buy</button>
               <button class="mkt-side ${this.side === "sell" ? "mkt-side-sell" : ""}" data-side="sell">Sell</button>
             </div>
+            <div class="mkt-modes">
+              <button class="gd-btn mkt-mode ${this.mode === "market" ? "active" : ""}" data-mode="market">Market</button>
+              <button class="gd-btn mkt-mode ${this.mode === "limit" ? "active" : ""}" data-mode="limit">Limit</button>
+            </div>
             <div class="mkt-ticket">
               <input class="lp-input mkt-qty" type="number" min="1" placeholder="coins" value="10" />
+              ${this.mode === "limit" ? `<input class="lp-input mkt-limitpx" type="number" min="0.0001" step="0.0001" placeholder="price" value="${((this.side === "buy" ? coin.bids?.[0]?.price : coin.asks?.[0]?.price) ?? st.lastPrice ?? 1).toFixed(4)}" />` : ""}
             </div>
             <div class="mkt-quote"></div>
             <button class="btn-primary mkt-place"></button>
-            <div class="mkt-note">Executes instantly at the market price.</div>
             ${wallet.orders.length ? `<div class="mkt-section">Your orders</div>${mineHtml}` : ""}
           </div>
           <div class="mkt-col">
-            <div class="mkt-section">Tape</div>
-            ${tape || `<div class="mkt-empty">No trades yet</div>`}
+            <div class="mkt-section">Order book</div>
+            <div class="tt-book">${bookLadder(coin.bids ?? [], coin.asks ?? [])}</div>
+            <div class="mkt-section">About ${st.name}</div>
+            <div class="tt-desc">${COIN_DESC[st.code] ?? ""}</div>
           </div>
         </div>
         <div class="mkt-cols" ${this.tab === "mining" ? "" : 'style="display:none"'}>
@@ -413,12 +410,6 @@ export class CryptoPanel {
       this.view = "list";
       void this.refresh();
     });
-    this.el.querySelectorAll<HTMLElement>(".cx-coin").forEach((b) =>
-      b.addEventListener("click", () => {
-        this.coinCode = b.dataset.c!;
-        void this.refresh();
-      })
-    );
     this.el.querySelectorAll<HTMLElement>(".mkt-res").forEach((b) =>
       b.addEventListener("click", () => {
         this.res = b.dataset.res!;
@@ -431,17 +422,33 @@ export class CryptoPanel {
         void this.refresh();
       })
     );
+    this.el.querySelectorAll<HTMLElement>(".mkt-mode").forEach((b) =>
+      b.addEventListener("click", () => {
+        this.mode = b.dataset.mode as "market" | "limit";
+        void this.refresh();
+      })
+    );
     this.el.querySelectorAll<HTMLElement>(".mkt-cancel").forEach((b) =>
       b.addEventListener("click", () => this.actions.cancel(Number(b.dataset.id)))
     );
     const qtyEl = this.el.querySelector<HTMLInputElement>(".mkt-qty")!;
+    const pxEl = this.el.querySelector<HTMLInputElement>(".mkt-limitpx");
     const quoteEl = this.el.querySelector<HTMLElement>(".mkt-quote")!;
     const placeBtn = this.el.querySelector<HTMLButtonElement>(".mkt-place")!;
     const upd = () => {
       const q = Math.floor(Number(qtyEl.value));
+      placeBtn.textContent = `${this.side === "buy" ? "Buy" : "Sell"}${q > 0 ? ` ${q.toLocaleString()}` : ""} ${st.symbol}`;
+      if (this.mode === "limit") {
+        const p = Number(pxEl?.value);
+        quoteEl.innerHTML =
+          q > 0 && p > 0
+            ? `<span>Total</span><b>${fmtPrice(q * p)}</b><span class="mkt-warn">rests on the book at your price — cancel any time under Your orders</span>`
+            : `<span class="mkt-empty">Set quantity and price</span>`;
+        placeBtn.disabled = !(q > 0 && p > 0);
+        return;
+      }
       const levels = this.side === "buy" ? coin.asks : coin.bids;
       const est = estimateFill(levels, Math.max(0, q));
-      placeBtn.textContent = `${this.side === "buy" ? "Buy" : "Sell"}${q > 0 ? ` ${q.toLocaleString()}` : ""} ${st.symbol}`;
       if (q <= 0 || !levels.length) {
         quoteEl.innerHTML = levels.length
           ? `<span>Price</span><b>${fmtPrice(levels[0].price)}</b>`
@@ -449,16 +456,21 @@ export class CryptoPanel {
         placeBtn.disabled = !levels.length;
         return;
       }
-      quoteEl.innerHTML = `<span>Price</span><b>${est.avg !== null ? fmtPrice(est.avg) : "—"}</b>
+      quoteEl.innerHTML = `<span>Avg price</span><b>${est.avg !== null ? fmtPrice(est.avg) : "—"}</b>
         <span>Total</span><b>${fmtPrice(est.total)}</b>
         ${q > est.available ? `<span class="mkt-warn">only ${est.available.toLocaleString()} available</span>` : ""}`;
       placeBtn.disabled = Math.min(q, est.available) <= 0;
     };
     qtyEl.addEventListener("input", upd);
+    pxEl?.addEventListener("input", upd);
     upd();
     placeBtn.addEventListener("click", () => {
       const q = Math.floor(Number(qtyEl.value));
-      if (q > 0) this.actions.trade(this.side, q, this.coinCode);
+      if (q <= 0) return;
+      if (this.mode === "limit") {
+        const p = Number(pxEl?.value);
+        if (p > 0) this.actions.trade(this.side, q, this.coinCode, Math.round(p * 10000) / 10000);
+      } else this.actions.trade(this.side, q, this.coinCode);
     });
   }
 }

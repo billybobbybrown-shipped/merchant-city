@@ -51,6 +51,7 @@ test("every lot faces a street (door is reachable)", () => {
   const at = (x: number, y: number) =>
     x < 0 || y < 0 || x >= m.width || y >= m.height ? -1 : m.tiles[y * m.width + x];
   for (const lot of m.lots) {
+    if (lot.yard) continue; // open-land parcels front no street by design
     // tile just outside the center of the lot's facing edge
     const cx = lot.x + Math.floor(lot.w / 2);
     const cy = lot.y + Math.floor(lot.h / 2);

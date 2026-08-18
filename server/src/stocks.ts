@@ -448,13 +448,47 @@ export class StocksStore {
           "select balance from accounts where entity_id = $1 and currency = 'clean'",
           [companyEid]
         );
-        const dps = declaredDps(
-          Number(s.dividend_ratio),
-          close,
-          Number(s.dps),
-          Number(cashRow.rows[0]?.balance ?? 0),
-          Number(s.shares_outstanding)
+        const cash = Number(cashRow.rows[0]?.balance ?? 0);
+        const prof = await pool.query(
+          `select
+             coalesce(sum(case when a_to.entity_id = $1 then l.amount else 0 end), 0)
+               - coalesce(sum(case when a_from.entity_id = $1 then l.amount else 0 end), 0) as profit
+             from ledger l
+             left join accounts a_to on a_to.id = l.to_account
+             left join accounts a_from on a_from.id = l.from_account
+            where (a_to.entity_id = $1 or a_from.entity_id = $1) and l.currency = 'clean'
+              and l.category not in ('transfer','ipo','dividend','land','construction','furniture','demolition','production_setup')
+              and l.reason not like 'trade % s:%'
+              and l.ts > coalesce($2::timestamptz, now() - make_interval(mins => $3))`,
+          [companyEid, s.last_pay, DIVIDEND_PERIOD_DAYS * 10]
         );
+        const profit = Number(prof.rows[0].profit);
+
+        // Dividend POLICY is a board decision, and NPC boards decide both
+        // ways: a payer ground down to nothing by losses may suspend
+        // entirely; a profitable growth name sitting on cash may initiate.
+        // Player-founded companies keep their own hands on this lever.
+        let ratio = Number(s.dividend_ratio);
+        const npcRow = await pool.query("select npc_operated from companies where entity_id = $1", [companyEid]);
+        if (npcRow.rows[0]?.npc_operated) {
+          if (ratio > 0 && profit < 0 && Number(s.dps) < 0.0005 && Math.random() < 0.3) {
+            ratio = 0;
+            await pool.query("update stocks set dividend_ratio = 0 where company_entity = $1", [companyEid]);
+            console.log(`[stocks] company ${companyEid} SUSPENDS its dividend after sustained losses`);
+          } else if (ratio === 0 && profit > 0 && cash > 100_000 && Math.random() < 0.12) {
+            ratio = Math.round((0.01 + Math.random() * 0.03) * 200) / 200;
+            await pool.query("update stocks set dividend_ratio = $2 where company_entity = $1", [companyEid, ratio]);
+            console.log(`[stocks] company ${companyEid} INITIATES a dividend at ${(ratio * 100).toFixed(1)}%/yr`);
+          }
+        }
+
+        let dps = declaredDps(ratio, close, Number(s.dps), cash, Number(s.shares_outstanding));
+        // the classic income-stock headline: a company that lost money all
+        // period CUTS. The rate halves until operations earn again.
+        if (profit < 0 && Number(s.dps) > 0) {
+          dps = Math.floor(Number(s.dps) * 0.5 * 1_000_000) / 1_000_000;
+          console.log(`[stocks] dividend cut: company ${companyEid} halves to ${dps}/sh after an unprofitable period`);
+        }
         await pool.query(
           "update stocks set dps = $2, last_pay = now(), pay_day_counter = 0 where company_entity = $1",
           [companyEid, dps]

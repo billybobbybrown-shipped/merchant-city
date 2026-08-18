@@ -1,4 +1,4 @@
-import { BASE_PRICE, furnitureById } from "@mc/shared";
+import { BASE_PRICE, coinByCode, furnitureById } from "@mc/shared";
 import { pool } from "./db.js";
 import { registry } from "./registry.js";
 import { StocksStore, stockKey } from "./stocks.js";
@@ -7,7 +7,7 @@ import { COINS } from "@mc/shared";
 import { CITY_ENTITY } from "./accounts.js";
 
 const WORLD_ID = 1;
-const COIN_MONETARY_SHARE = 0.25; // share of citizen money the coin float represents
+
 
 // ---------------------------------------------------------------------------
 // The market, reworked around one idea: every asset has a continuous MARK — a
@@ -38,13 +38,16 @@ const LADDER = [0.004, 0.01, 0.018]; // half-spread of each quote level
 // every market (recycling fees back into citizen pockets when they sell), and
 // offers from whatever inventory those purchases accumulate. This is where
 // DEPTH comes from — citizens add colour, the desk absorbs size.
-const DESK_RESERVE = 60_000; // treasury never bids below this cushion
+const DESK_RESERVE = 60_000;
+const DESK_MAX_POS = 40_000; // max inventory value per asset before the bid goes dark-ish // treasury never bids below this cushion
 const DESK_TICK_BUDGET = 0.04; // share of free treasury committed per tick per asset
 const QUOTE_TTL_MIN = 2; // maker quotes are refreshed, not left to rot
 
 interface MarkState {
   mark: number;
   mood: number;
+  sent?: number; // sentiment multiplier on fair value (coins) — see evolveMark
+  fairEma?: number; // slow-followed fair value, so a growing economy reads as gentle drift
 }
 
 export class MarketMakers {
@@ -91,6 +94,44 @@ export class MarketMakers {
     }
   }
 
+  // Real market-maker discipline for the city desk: quotes LEAN AWAY from
+  // inventory (skew), bid size shrinks as the position cap fills, the spread
+  // widens with recent volatility — and there is always a two-sided
+  // obligation quote, small and wide, so the market never disappears, it
+  // only gets expensive. NYSE DMM rules, in miniature.
+  private async deskPlan(
+    kind: "stock" | "coin",
+    key: string,
+    mark: number,
+    held: number,
+    free: number
+  ): Promise<{ bidPx: number; bidQty: number; askPx: number; askQty: number }> {
+    const invValue = held * mark;
+    const full = Math.max(0, Math.min(1, invValue / DESK_MAX_POS));
+    const volR = await pool.query(
+      `select coalesce((max(price) - min(price)) / nullif(min(price), 0), 0) as v
+         from price_marks where world_id = $1 and asset_type = $2 and item = $3
+          and ts > now() - make_interval(mins => 15)`,
+      [WORLD_ID, kind, key]
+    );
+    const vol = Number(volR.rows[0]?.v ?? 0);
+    const half = Math.min(0.05, 0.005 + vol * 0.4 + full * 0.01);
+    const center = mark * (1 - 0.015 * full);
+    const round = (v: number) =>
+      kind === "coin" ? Math.max(0.001, Math.round(v * 10000) / 10000) : Math.max(0.05, Math.round(v * 100) / 100);
+    const minQty = kind === "coin" ? 10 : 25;
+    let bidPx = round(center * (1 - half));
+    let bidQty = free > 0 ? Math.floor((free * DESK_TICK_BUDGET * (1 - full)) / mark) : 0;
+    if (bidQty < minQty) {
+      // the obligation quote: token size, well away from the action
+      bidQty = minQty;
+      bidPx = round(mark * 0.95);
+    }
+    const askPx = round(center * (1 + half));
+    const askQty = held > 0 ? Math.max(Math.min(held, minQty), Math.floor(held * (0.2 + 0.3 * full))) : 0;
+    return { bidPx, bidQty, askPx, askQty };
+  }
+
   // ---- shared machinery ---------------------------------------------------
 
   private async recordMark(assetType: string, item: string, price: number): Promise<void> {
@@ -131,10 +172,26 @@ export class MarketMakers {
   }
 
   // one step of the mark's life: trend + noise + gravity + player pressure
-  private evolveMark(key: string, prev: number | null, fair: number | null, flow: number): number {
+  // sentVol > 0 gives the asset a SENTIMENT CYCLE: a slow-wandering
+  // multiplier on fair value (an OU walk pulled gently back to 1, clamped
+  // 0.5-2.2x). The mark then chases a target that itself booms and busts
+  // over the hours — pumps, corrections, red days — instead of grinding
+  // one way toward a fixed anchor. Crypto trades on narrative.
+  private evolveMark(key: string, prev: number | null, fair: number | null, flow: number, sentVol = 0): number {
     const st = this.state.get(key) ?? { mark: prev ?? fair ?? 1, mood: 0 };
     if (prev !== null && !this.state.has(key)) st.mark = prev;
     let mood = st.mood * MOOD_DECAY + (Math.random() - 0.5) * MOOD_STEP;
+    if (sentVol > 0 && fair !== null && fair > 0) {
+      // the fundamentals move like fundamentals: citizen wealth feeding the
+      // anchor is EMA-smoothed (halflife ~1h) so a booming young economy
+      // reads as gentle baseline drift, not a one-way escalator...
+      st.fairEma = st.fairEma === undefined ? fair : st.fairEma + (fair - st.fairEma) * 0.002;
+      // ...and the SENTIMENT wave on top decides the day: boom, correction,
+      // red week, recovery
+      const sent = st.sent ?? 1;
+      st.sent = Math.max(0.5, Math.min(2.2, sent * (1 + (Math.random() - 0.5) * 2 * sentVol - (sent - 1) * 0.004)));
+      fair = st.fairEma * st.sent;
+    }
     let revert = 0;
     if (fair !== null && fair > 0) {
       const stretch = (st.mark - fair) / fair;
@@ -216,7 +273,7 @@ export class MarketMakers {
     return value / shares;
   }
 
-  // What the float is worth if citizens hold ~25% of their money in coin.
+  // What the float is worth if citizens hold their coin-slice of money in it.
   private async coinFairValue(code = "duc"): Promise<number | null> {
     const r = await pool.query(
       `select (select coalesce(sum(a.balance), 0) from accounts a
@@ -227,7 +284,7 @@ export class MarketMakers {
     const cash = Number(r.rows[0].cash);
     const supply = Number(r.rows[0].supply);
     if (!(supply > 0)) return null;
-    return (cash * COIN_MONETARY_SHARE) / supply;
+    return (cash * (coinByCode(code)?.monetaryShare ?? 0.2)) / supply;
   }
 
   // citizens with spare cash (bid side)
@@ -297,30 +354,22 @@ export class MarketMakers {
           await this.stocks.trade(bidders[i], s.company, "buy", qty, p).catch(() => {});
         }
       }
-      // the desk's standing bid — real size, priced just under the mark
+      // the desk: a disciplined market maker, not a buyer of last resort
       const treasury = await pool.query(
         "select balance from accounts where entity_id = $1 and currency = 'clean'", [CITY_ENTITY]
       );
       const free = Number(treasury.rows[0]?.balance ?? 0) - DESK_RESERVE;
-      if (free > 0) {
-        const p = px(0.992);
-        const qty = Math.floor((free * DESK_TICK_BUDGET) / p);
-        if (qty >= 50) {
-          await this.requote("stock", CITY_ENTITY, key, "buy");
-          await this.stocks.trade(CITY_ENTITY, s.company, "buy", qty, p).catch(() => {});
-        }
-      }
-      // and the desk's OFFER: what it bought, it sells back a little above the
-      // mark — the ask side of the market is never left to starve
       const deskShares = await pool.query(
         "select shares from share_holdings where company_entity = $1 and holder_entity = $2",
         [s.company, CITY_ENTITY]
       );
       const held = Number(deskShares.rows[0]?.shares ?? 0);
-      if (held >= 50) {
+      const plan = await this.deskPlan("stock", key, mark, held, free);
+      await this.requote("stock", CITY_ENTITY, key, "buy");
+      await this.stocks.trade(CITY_ENTITY, s.company, "buy", plan.bidQty, plan.bidPx).catch(() => {});
+      if (plan.askQty > 0) {
         await this.requote("stock", CITY_ENTITY, key, "sell");
-        const qty = Math.max(50, Math.floor(held * 0.25));
-        await this.stocks.trade(CITY_ENTITY, s.company, "sell", qty, px(1.006)).catch(() => {});
+        await this.stocks.trade(CITY_ENTITY, s.company, "sell", plan.askQty, plan.askPx).catch(() => {});
       }
       // holders offer real size — their stacks run to hundreds of thousands
       const holders = await pool.query(
@@ -374,10 +423,10 @@ export class MarketMakers {
       (lastRow.rowCount ? Number(lastRow.rows[0].price) : ((await this.coinFairValue(code)) ?? 1));
     const fair = await this.coinFairValue(code);
     const flow = await this.playerFlow("coin", code, 15);
-    const mark = this.evolveMark(`coin:${code}`, prev, fair, flow);
+    const mark = this.evolveMark(`coin:${code}`, prev, fair, flow, 0.02);
     await this.recordMark("coin", code, mark);
 
-    const px = (mult: number) => Math.max(0.01, Math.round(mark * mult * 100) / 100);
+    const px = (mult: number) => Math.max(0.001, Math.round(mark * mult * 10000) / 10000);
 
     // ladder bids from citizens, then the desk's standing bid with real size
     const bidders = await this.cashSavers(5, 300);
@@ -390,22 +439,16 @@ export class MarketMakers {
       "select balance from accounts where entity_id = $1 and currency = 'clean'", [CITY_ENTITY]
     );
     const free = Number(treasury.rows[0]?.balance ?? 0) - DESK_RESERVE;
-    if (free > 0) {
-      const p = px(0.992);
-      const qty = Math.floor((free * DESK_TICK_BUDGET) / p);
-      if (qty >= 20) {
-        await this.requote("coin", CITY_ENTITY, code, "buy");
-        await this.crypto.trade(CITY_ENTITY, "buy", qty, p, false, code).catch(() => {});
-      }
-    }
-    // the desk's coin inventory works the ask side
     const deskCoin = await pool.query(
       "select balance from accounts where entity_id = $1 and currency = $2", [CITY_ENTITY, code]
     );
     const deskStack = Math.floor(Number(deskCoin.rows[0]?.balance ?? 0));
-    if (deskStack >= 20) {
+    const plan = await this.deskPlan("coin", code, mark, deskStack, free);
+    await this.requote("coin", CITY_ENTITY, code, "buy");
+    await this.crypto.trade(CITY_ENTITY, "buy", plan.bidQty, plan.bidPx, false, code).catch(() => {});
+    if (plan.askQty > 0) {
       await this.requote("coin", CITY_ENTITY, code, "sell");
-      await this.crypto.trade(CITY_ENTITY, "sell", Math.floor(deskStack * 0.3), px(1.006), false, code).catch(() => {});
+      await this.crypto.trade(CITY_ENTITY, "sell", plan.askQty, plan.askPx, false, code).catch(() => {});
     }
     // asks from real stacks — including whatever the desk has accumulated
     const holders = await pool.query(

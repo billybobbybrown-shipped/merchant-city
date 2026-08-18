@@ -1,4 +1,4 @@
-import { ITEMS, SECTORS, itemById, sectorOf } from "@mc/shared";
+import { ITEMS, SECTORS, itemById, sectorOf, BASE_PRICE } from "@mc/shared";
 import { SERVER_URL } from "../config.js";
 import { ic } from "./icons.js";
 
@@ -8,6 +8,7 @@ interface Summary {
   bid: number | null;
   ask: number | null;
   dayVol: number;
+  totalVol: number;
 }
 interface Book {
   bids: Array<{ price: number; qty: number }>;
@@ -128,9 +129,11 @@ export class ExchangePanel {
     const countEl = this.el.querySelector<HTMLElement>(".exl-count")!;
     const renderGrid = () => {
       const q = this.search.trim().toLowerCase();
+      // the same number the card displays is the number the sort ranks —
+      // anything else reads as a scrambled list
       const px = (id: string) => {
         const s = byItem.get(id);
-        return s?.last ?? s?.ask ?? s?.bid ?? null;
+        return s?.last ?? s?.ask ?? s?.bid ?? BASE_PRICE[id] ?? 10;
       };
       const items = ITEMS.filter((it) => {
         if (this.sector !== "all" && sectorOf(it.id) !== this.sector) return false;
@@ -139,16 +142,14 @@ export class ExchangePanel {
       }).sort((a, b) => {
         if (this.sort === "name") return a.label.localeCompare(b.label);
         if (this.sort === "volume") {
-          const d = (byItem.get(b.id)?.dayVol ?? 0) - (byItem.get(a.id)?.dayVol ?? 0);
-          return d !== 0 ? d : a.label.localeCompare(b.label);
+          const av = byItem.get(a.id);
+          const bv = byItem.get(b.id);
+          const d = (bv?.totalVol ?? 0) - (av?.totalVol ?? 0);
+          if (d !== 0) return d;
+          const dd = (bv?.dayVol ?? 0) - (av?.dayVol ?? 0);
+          return dd !== 0 ? dd : a.label.localeCompare(b.label);
         }
-        // price sorts put unpriced goods last either way
-        const pa = px(a.id);
-        const pb = px(b.id);
-        if (pa == null && pb == null) return a.label.localeCompare(b.label);
-        if (pa == null) return 1;
-        if (pb == null) return -1;
-        return this.sort === "px_desc" ? pb - pa : pa - pb;
+        return this.sort === "px_desc" ? px(b.id) - px(a.id) : px(a.id) - px(b.id);
       });
       countEl.textContent = `${items.length} of ${ITEMS.length}`;
       gridEl.innerHTML = items.length
@@ -161,20 +162,19 @@ export class ExchangePanel {
                       s?.ask != null ? "ask " + money(s.ask) : ""
                     }`
                   : "no open orders";
+              const volSub =
+                this.sort === "volume" && (s?.totalVol ?? 0) > 0
+                  ? `traded ${s!.totalVol.toLocaleString()}${(s?.dayVol ?? 0) > 0 ? ` · ${s!.dayVol.toLocaleString()} today` : ""}`
+                  : null;
               // a good with no trades yet still has a price if someone is
               // quoting it — show that, so the price sorts read straight
               const quote = s?.ask ?? s?.bid ?? null;
-              const price =
-                s?.last != null
-                  ? money(s.last)
-                  : quote != null
-                    ? `${money(quote)} <span class="exl-q">quoted</span>`
-                    : "no market";
+              const price = money(s?.last ?? quote ?? BASE_PRICE[it.id] ?? 10);
               return `<div class="exl-card" data-item="${it.id}">
                 ${ic(it.id, 26)}
                 <div class="exl-card-name">${it.label}</div>
-                <div class="exl-card-px ${s?.last != null ? "" : "exl-dim"}">${price}</div>
-                <div class="exl-card-sub">${sub}</div>
+                <div class="exl-card-px">${price}</div>
+                <div class="exl-card-sub">${volSub ?? sub}</div>
               </div>`;
             })
             .join("")
@@ -259,7 +259,7 @@ export class ExchangePanel {
           <span class="ex-title">
             <button class="gd-btn ex-back">‹ All items</button>
             ${ic(this.item, 20)} ${sel.label}
-            <b class="ex-last">${s?.last != null ? money(s.last) : "no trades yet"}</b></span>
+            <b class="ex-last">${money(s?.last ?? BASE_PRICE[this.item] ?? 10)}</b></span>
           <span class="ex-head-right">
             <button class="gd-btn ex-res ${this.res === "1m" ? "active" : ""}" data-res="1m">1m</button>
             <button class="gd-btn ex-res ${this.res === "10m" ? "active" : ""}" data-res="10m">1 day</button>
@@ -281,7 +281,7 @@ export class ExchangePanel {
             <div class="lp-inline">
               <input class="lp-input ex-qty" type="number" min="1" placeholder="qty" value="10" />
               <input class="lp-input ex-price" type="number" min="0.01" step="0.01" placeholder="price"
-                value="${(s?.last ?? 10).toFixed(2)}" />
+                value="${(s?.last ?? (this.side === "buy" ? s?.ask ?? s?.bid : s?.bid ?? s?.ask) ?? BASE_PRICE[this.item] ?? 10).toFixed(2)}" />
             </div>
             <div class="lp-hint ex-total"></div>
             <button class="btn-primary ex-place">Place order</button>

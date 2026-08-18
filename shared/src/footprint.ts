@@ -43,6 +43,16 @@ export function buildingLayout(def: BuildingDef, fw: number, fd: number): Buildi
       const cz = (y0 + y1) / 2 - fd / 2;
       return { w: x1 - x0, d: y1 - y0, centerZ: cz };
     }
+    case "gas_station": {
+      // the STORE is the structure — a low box across the back of the plot;
+      // the front half is open forecourt where the client draws the canopy
+      // and pumps. Interiors derive from this, so you walk the store only.
+      const d = Math.min(fd * rrange(rng, 0.26, 0.34), 7);
+      // width tied to depth so the store reads as a compact kiosk, never a
+      // stretched slab across the whole plot
+      const w = Math.min(fw * rrange(rng, 0.5, 0.65), d * 2.1, 12);
+      return { w, d, centerZ: -(fd / 2 - d / 2 - 0.4) };
+    }
     case "house":
       return {
         w: Math.min(fw * rrange(rng, 0.55, 0.8), 14),

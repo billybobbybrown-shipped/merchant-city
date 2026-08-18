@@ -150,7 +150,11 @@ export function facadeTexture(
   const rng = mulberry32(hashSeed(style, floors, cols, variant, 0xfacade));
   const pal = STYLES[style % STYLES.length];
   const industrial = kind === "warehouse" || kind === "factory";
-  const floorPx = 36;
+  // multi-floor canvases fit exactly (h = floors*36+16), but a single floor
+  // rides a 72px minimum canvas — drawing it at 36px squishes everything to
+  // half the wall. Stations scale their one floor to the real canvas; other
+  // kinds keep their long-standing look untouched.
+  const floorPx = kind === "gas_station" ? (Math.max(72, floors * 36 + 16) - 16) / floors : 36;
   const colPx = 30;
   const w = Math.max(96, cols * colPx);
   const h = Math.max(72, floors * floorPx + 16);
@@ -181,7 +185,9 @@ export function facadeTexture(
   const doorX = Math.floor(w / 2 - doorW / 2);
 
   // windows (skip most of the wall for industrial: one high strip)
-  const litChance = 0.38;
+  // small buildings live or die by a couple of windows — keep more of
+  // theirs lit so streets read alive at night; towers stay sparse
+  const litChance = floors <= 2 ? 0.55 : 0.38;
   const winW = colPx - 12;
   const winH = floorPx - 16;
   const rows = industrial ? 1 : floors;
@@ -236,7 +242,7 @@ export function facadeTexture(
   };
 
   if (door && !industrial) {
-    paneledDoor(doorX, doorW, 29);
+    paneledDoor(doorX, doorW, Math.round(29 * (floorPx / 36)));
   } else if (door && industrial) {
     // big roller door
     ctx.fillStyle = "#5f6569";

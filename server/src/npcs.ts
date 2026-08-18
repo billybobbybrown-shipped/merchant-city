@@ -42,8 +42,15 @@ const GOODS_DECAY_PER_SEC = 0.22 / 600;
 const DECIDE_EVERY_MS = 6000; // how often an idle NPC considers going somewhere
 
 // what needs accept
-const FOOD_ITEMS = ["bread", "corn", "carrots"];
-const GOODS_ITEMS = ["shirt", "phone"];
+const FOOD_ITEMS = ["bread", "corn", "carrots", "flour"];
+// the household list runs from hardware to furniture to hobbyist rig parts —
+// each citizen's trip picks whatever offer scores best for them, so cheap
+// staples and big-ticket electronics coexist without starving each other
+const GOODS_ITEMS = [
+  "shirt", "phone", "rug", "plant", "desk", "chair", "nails",
+  "ram_ddr4", "ram_ddr5", "ram_ecc", "gpu", "cpu_basic", "cpu_adv", "psu_unit", "cooling_fan",
+  "hunting_rifle", "pistol", "shotgun", "ammo",
+];
 const VICE_ITEMS = ["beer", "cigarettes", "whiskey", "cigars"];
 
 interface Offer {
@@ -1071,23 +1078,32 @@ export class NpcSim {
     this.sendTo(n, (t.x + 0.5) * TS, (t.y + 0.5) * TS);
   }
 
-  // pick the best shop for a need: cheap vs the reference price, close, inviting
+  // pick a shop for a need: cheap vs the reference price, close, inviting.
+  // WEIGHTED choice, not winner-take-all — a shop priced above its rivals
+  // loses custom gradually, it doesn't flatline. Mispricing slows a
+  // business; it shouldn't execute it.
   private startShopping(n: Npc, need: "food" | "goods" | "vice"): boolean {
     const wants = need === "food" ? FOOD_ITEMS : need === "vice" ? VICE_ITEMS : GOODS_ITEMS;
-    let best: Offer | null = null;
-    let bestScore = -Infinity;
+    const pool: Array<{ o: Offer; w: number }> = [];
     for (const item of wants) {
       for (const o of this.offers.get(item) ?? []) {
         if (o.qty <= 0) continue;
         const dist = Math.hypot(o.x - n.x, o.y - n.y);
-        const score = scoreOffer({ item, price: o.price, appeal: o.appeal, dist }) + Math.random() * 0.4;
-        if (score > bestScore) {
-          bestScore = score;
-          best = o;
-        }
+        const score = scoreOffer({ item, price: o.price, appeal: o.appeal, dist });
+        if (score === -Infinity) continue;
+        pool.push({ o, w: Math.exp(score / 0.5) });
       }
     }
-    if (!best) return false;
+    if (!pool.length) return false;
+    let roll = Math.random() * pool.reduce((a, p) => a + p.w, 0);
+    let best: Offer = pool[0].o;
+    for (const p of pool) {
+      roll -= p.w;
+      if (roll <= 0) {
+        best = p.o;
+        break;
+      }
+    }
     const door = this.shopDoor(best.lotId);
     if (!this.sendTo(n, door?.x ?? best.x, door?.y ?? best.y)) return false;
     n.errand = {
@@ -1450,6 +1466,45 @@ export class NpcSim {
     n.workPause = 0;
   }
 
+  // Managers walk the shelves and reprice toward what the market will bear:
+  // flying off the shelf = charge more, gathering dust = charge less. Runs
+  // for ANY shop with a manager on staff — player-owned and company-owned
+  // alike. No reference tables: sell-through is the only signal.
+  private async runManagerPricing() {
+    if (!this.goods) return;
+    const listings = await pool.query(
+      `select sl.lot_id, sl.furn_id, sl.item, sl.price,
+              coalesce((select i.qty from inventories i
+                 where i.world_id = sl.world_id and i.holder_type = 'shelf'
+                   and i.holder_id = sl.furn_id::text and i.item = sl.item), 0) as stock
+         from shelf_listings sl where sl.world_id = $1`,
+      [WORLD_ID]
+    );
+    for (const row of listings.rows) {
+      const lotId = Number(row.lot_id);
+      if (!this.isStaffed(lotId, "manager")) continue;
+      const sold = await pool.query(
+        `select count(*) as n from ledger
+          where category = 'retail_sale' and reason = $1 and ts > now() - interval '10 minutes'`,
+        [`${row.item} @ lot ${lotId}`]
+      );
+      const n = Number(sold.rows[0].n);
+      const stock = Number(row.stock);
+      let px = Number(row.price);
+      if (n > 0 && stock <= 2) px *= 1.05;
+      else if (n === 0 && stock > 0) px *= 0.96;
+      else continue;
+      px = Math.max(0.05, Math.round(px * 100) / 100);
+      if (px === Number(row.price)) continue;
+      await pool.query(
+        "update shelf_listings set price = $4 where world_id = $1 and furn_id = $2 and item = $3",
+        [WORLD_ID, row.furn_id, row.item, px]
+      );
+      const { registry: reg } = await import("./registry.js");
+      reg.broadcast("shopChanged", { lotId });
+    }
+  }
+
   // crafters keep machines running toward whatever the shop has priced
   private async runCrafters() {
     if (!this.goods) return;
@@ -1564,8 +1619,9 @@ export class NpcSim {
           await this.goods.transfer(n.eid, lotId, "bread", pocket.bread!, true).catch(() => {});
         }
         if (onHand < 8 && balance > 200) {
-          const limit = Math.round(BASE_PRICE.bread * 1.3 * 100) / 100;
-          await this.market.place(n.eid, "buy", "bread", 10, limit).catch(() => {});
+          const ref = await this.market.refPrice("bread");
+          const limit = Math.round(Math.min(ref * 1.02, retailPrice(BASE_PRICE.bread * 1.3) * 0.8) * 100) / 100;
+          if (limit > 0.01) await this.market.place(n.eid, "buy", "bread", 10, limit).catch(() => {});
         }
         const inStore = (await this.goods.inventory("lot", String(lotId))).bread ?? 0;
         await this.goods
@@ -1610,6 +1666,7 @@ export class NpcSim {
   async runDay(): Promise<void> {
     await this.runJobHunt();
     await this.runCrafters();
+    await this.runManagerPricing();
     await this.runEntrepreneurs();
     await this.runHousingUpgrades();
     for (const n of this.npcs.values()) {

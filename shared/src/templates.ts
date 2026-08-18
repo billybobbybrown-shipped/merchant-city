@@ -22,6 +22,10 @@ export const BUILD_TEMPLATES: BuildTemplate[] = [
   { id: "workshop", label: "Workshop", kind: "factory", floors: 2, minW: 4, minD: 4, cost: 12000, buildMinutes: 4 },
   { id: "office", label: "Office", kind: "office", floors: 4, minW: 4, minD: 4, cost: 14000, buildMinutes: 5 },
   { id: "apartment", label: "Apartment", kind: "apartment", floors: 4, minW: 4, minD: 4, cost: 12000, buildMinutes: 4 },
+  { id: "tower", label: "Tower", kind: "tower", floors: 10, minW: 5, minD: 5, cost: 60000, buildMinutes: 8 },
+  { id: "skyscraper", label: "Skyscraper", kind: "skyscraper", floors: 18, minW: 6, minD: 6, cost: 150000, buildMinutes: 12 },
+  // a station needs forecourt depth, not just floor space
+  { id: "gas_station", label: "Gas Station", kind: "gas_station", floors: 1, minW: 6, minD: 8, cost: 9000, buildMinutes: 4 },
 ];
 
 export const templateById = (id: string) => BUILD_TEMPLATES.find((t) => t.id === id);

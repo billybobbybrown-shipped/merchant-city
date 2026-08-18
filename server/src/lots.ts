@@ -15,6 +15,8 @@ import {
   LotState,
   TILE_WORLD_SIZE,
   validatePlan,
+  templateById,
+  templateFits,
 } from "@mc/shared";
 import { pool } from "./db.js";
 
@@ -317,6 +319,52 @@ export class LotStore {
     st.forSale = false;
     st.price = 0;
     return st;
+  }
+
+  // Build a PRESET building — the same procedural kinds the city generates
+  // (house, shop, tower, gas station...), placed whole on a clear lot for a
+  // flat cash price. Custom drawing stays its own path.
+  async buildTemplate(
+    eid: number,
+    lotId: number,
+    templateId: string
+  ): Promise<{ lot: LotState; cash: Map<number, number> }> {
+    const t = templateById(templateId);
+    if (!t) throw new EconomyError("unknown building type");
+    const st = this.state.get(lotId);
+    const lot = this.lots.get(lotId);
+    if (!st || !lot) throw new EconomyError("no such lot");
+    if (!this.ownsLot(eid, lotId)) throw new EconomyError("you don't own this lot");
+    if (st.building) throw new EconomyError("there's already a building here");
+    if (st.source) throw new EconomyError("this lot is a production site — clear it first");
+    if (!this.isVacant(lotId)) throw new EconomyError("demolish the existing building first");
+    if (!templateFits(t, lot)) throw new EconomyError(`this lot is too small for a ${t.label.toLowerCase()}`);
+
+    const ownerName = await this.entityName(eid);
+    const seed = (Math.imul(lotId, 2654435761) ^ Date.now()) & 0x7fffffff;
+    const name = `${ownerName} ${t.label}`;
+    const doneAt = Date.now() + t.buildMinutes * 60_000;
+    const client = await pool.connect();
+    const cash = new Map<number, number>();
+    try {
+      await client.query("begin");
+      const bal = await transfer(client, eid, CITY_ENTITY, t.cost, "construction", `build ${t.label} on lot ${lotId}`);
+      cash.set(eid, bal.from);
+      await client.query(
+        `insert into buildings (world_id, lot_id, owner_id, template, kind, floors, seed, name, done_at, shape)
+         values ($1, $2, (select id from players where entity_id = $3), $4, $5, $6, $7, $8, to_timestamp($9 / 1000.0), null)`,
+        [WORLD_ID, lotId, eid, t.id, t.kind, t.floors, seed, name, doneAt]
+      );
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback");
+      if ((err as any)?.code === "23505") throw new EconomyError("already built here");
+      throw err;
+    } finally {
+      client.release();
+    }
+    st.building = { template: t.id, kind: t.kind, floors: t.floors, seed, name, doneAt, startedAt: Date.now() } as never;
+    return { lot: st, cash };
   }
 
   async build(

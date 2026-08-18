@@ -13,6 +13,7 @@ import {
   recipeById,
   permitFor,
   PermitCategory,
+  DAY_LENGTH_SEC,
 } from "@mc/shared";
 import { pool } from "./db.js";
 import { registry } from "./registry.js";
@@ -671,7 +672,8 @@ export class GoodsStore {
     lotId: number,
     item: string,
     price: number,
-    qty: number
+    qty: number,
+    keepExisting = false
   ): Promise<void> {
     const shelves = await this.shelvesOf(lotId);
     if (!shelves.length) return;
@@ -679,9 +681,11 @@ export class GoodsStore {
     // where nothing is listed at all — otherwise an owner who deliberately
     // leaves a shelf free would find the shopkeeper had taken it over.
     const listed = shelves.find((sh) => sh.item === item);
-    const target = listed ?? (shelves.every((sh) => sh.item === null) ? shelves[0] : undefined);
+    const target = listed ?? shelves.find((sh) => sh.item === null);
     if (!target) return;
-    await this.setShelfListing(eid, target.furnId, item, price);
+    // keepExisting: the restock run never touches a price a manager set —
+    // it only prices a brand-new listing
+    if (!(keepExisting && listed)) await this.setShelfListing(eid, target.furnId, item, price);
     // the shop's own staff carry it out of the racks — the same trip a
     // stocker makes, not a reach into the owner's pockets
     const room = target.capacity - (target.item === item ? target.qty : 0);
@@ -710,8 +714,19 @@ export class GoodsStore {
     for (const row of r.rows) {
       const recipe = recipeById(row.recipe);
       if (!recipe) continue;
+      const made = recipe.outQty * row.count;
       // finished goods go into whichever rack in the building has room
-      await this.putIntoProperty(Number(row.lot_id), recipe.out, recipe.outQty * row.count);
+      await this.putIntoProperty(Number(row.lot_id), recipe.out, made);
+      // production is recorded HERE, when it happens — the craft row is gone
+      // after this, so a day-close scan of the table would never see it
+      const bucket = Math.floor(Date.now() / 1000 / DAY_LENGTH_SEC);
+      await pool.query(
+        `insert into stat_commodity (world_id, bucket, item, produced, consumed)
+         values ($1,$2,$3,$4,0)
+         on conflict (world_id, bucket, item) do update
+           set produced = stat_commodity.produced + $4`,
+        [WORLD_ID, bucket, recipe.out, made]
+      );
     }
   }
 

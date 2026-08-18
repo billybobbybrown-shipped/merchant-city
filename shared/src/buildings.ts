@@ -11,7 +11,8 @@ export type BuildingKind =
   | "apartment"
   | "house"
   | "warehouse"
-  | "factory";
+  | "factory"
+  | "gas_station";
 
 export interface BuildingDef {
   kind: BuildingKind;
@@ -26,11 +27,13 @@ export interface BuildingDef {
 const ADJ = ["Golden", "Iron", "Blue", "Old Town", "Silver", "Copper", "North", "Harbor", "Union", "Central", "Royal", "Cedar"];
 const SHOP = ["Fork", "Mercantile", "Goods", "Supply Co", "Market", "Trading Post", "Emporium", "Outfitters", "Deli", "Cafe", "Books", "Hardware"];
 const CORP = ["Holdings", "Group", "Industries", "Capital", "Logistics", "Works", "& Sons", "Consolidated", "Partners", "Manufacturing"];
+const GAS = ["Fuel Stop", "Gas & Go", "Petroleum", "Service Station", "Filling Station", "Fuels"];
 
 // Deterministic: the same city seed + lot always yields the same building (or
 // vacancy). Zones do NOT drive assignment — any building type can appear on any
 // lot anywhere; only skyscrapers/towers carry a soft pull toward downtown.
 export function buildingForLot(citySeed: number, lot: LotDef): BuildingDef | null {
+  if (lot.yard) return null; // open land: no city building ever stood here
   const rng = mulberry32(hashSeed(citySeed, lot.id, 0xb11d));
   const area = lot.w * lot.h;
   if (chance(rng, area >= 40 ? 0.06 : 0.12)) return null;
@@ -63,6 +66,8 @@ export function buildingForLot(citySeed: number, lot: LotDef): BuildingDef | nul
     ["office", 0.14],
     ["warehouse", 0.12],
     ["factory", area >= 24 ? 0.08 : 0],
+    // a forecourt needs room — corner-store plots don't get pumps
+    ["gas_station", area >= 30 ? 0.05 : 0],
   ];
   let total = 0;
   for (const [, wgt] of weights) total += wgt;
@@ -84,6 +89,8 @@ export function buildingForLot(citySeed: number, lot: LotDef): BuildingDef | nul
       return { kind, floors: rint(rng, 3, 8), style, seed, name: corpName };
     case "warehouse":
       return { kind, floors: 1, style, seed, name: corpName };
+    case "gas_station":
+      return { kind, floors: 1, style, seed, name: `${pick(rng, ADJ)} ${pick(rng, GAS)}` };
     default:
       return { kind: "factory", floors: 2, style, seed, name: corpName };
   }

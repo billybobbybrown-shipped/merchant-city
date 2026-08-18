@@ -460,7 +460,7 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 .bm-kind.active { background: rgba(232, 216, 174, 0.1); border-color: rgba(232, 216, 174, 0.55); color: #e8d8ae; }
 
 /* farm crop sub-row */
-.bm-crops { display: flex; align-items: center; gap: 5px; margin: 2px 0 4px; }
+.bm-crops { display: flex; align-items: center; gap: 5px; margin: 2px 0 4px; flex-wrap: wrap; }
 .bm-crops .bm-label { margin-right: 3px; }
 .bm-crop {
   display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px;
@@ -578,7 +578,7 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 }
 .mkt-stat { display: flex; flex-direction: column; gap: 1px; padding: 0 14px; border-right: 1px solid rgba(255,255,255,0.07); }
 .mkt-stat:last-child { border-right: none; }
-.mkt-stat span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(139,150,161,0.8); }
+.mkt-stat > span:first-child { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(139,150,161,0.8); }
 .mkt-stat b { font-size: 13px; }
 .mkt-cols { display: flex; gap: 16px; margin-top: 12px; min-height: 0; flex: 1; }
 .mkt-col { flex: 1; min-width: 0; overflow-y: auto; }
@@ -616,10 +616,7 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 .mkt-bid span { color: #5fae6b; font-weight: 600; }
 .mkt-ask span { color: #c0564a; font-weight: 600; }
 .mkt-lvl span, .mkt-lvl b { position: relative; }
-.mkt-spread {
-  text-align: center; font-size: 11px; color: rgba(139,150,161,0.8);
-  padding: 4px 0; margin: 2px 0; border-top: 1px dashed rgba(255,255,255,0.1); border-bottom: 1px dashed rgba(255,255,255,0.1);
-}
+
 /* ticket */
 .mkt-sides { display: flex; gap: 6px; margin-bottom: 8px; }
 .mkt-side {
@@ -628,6 +625,8 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
 }
 .mkt-side-buy { background: rgba(95,174,107,0.2); border-color: #5fae6b; color: #7cc98a; }
 .mkt-side-sell { background: rgba(192,86,74,0.2); border-color: #c0564a; color: #e07a6a; }
+.mkt-modes { display: flex; gap: 6px; margin-bottom: 6px; }
+.mkt-modes .gd-btn.active { background: rgba(232,216,174,0.16); color: #e8d8ae; }
 .mkt-ticket { display: flex; gap: 6px; }
 .mkt-ticket .lp-input { flex: 1; min-width: 0; }
 .mkt-total { font-size: 12px; opacity: 0.75; margin: 6px 2px; min-height: 15px; }
@@ -659,6 +658,52 @@ body { font-family: system-ui, -apple-system, sans-serif; color: #dfe5ea; }
   font-style: normal; font-size: 10.5px; margin-left: 6px; opacity: 0.6;
   background: rgba(232,216,174,0.12); color: #e8d8ae; border-radius: 4px; padding: 1px 5px;
 }
+
+/* ---------- trading terminal layout (stocks + crypto detail) ---------- */
+/* header identity block: SYMBOL over full name, like a real terminal */
+.mkt-symbox { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mkt-symline { display: flex; align-items: center; gap: 7px; }
+.mkt-sym { font-size: 16px; font-weight: 800; letter-spacing: 0.6px; color: #e8d8ae; }
+.mkt-fullname { font-size: 11px; opacity: 0.55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mkt-sector {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  padding: 2px 6px; border-radius: 4px; background: rgba(124,185,232,0.13); color: #7cb9e8;
+}
+.mkt-pxbox { display: flex; flex-direction: column; align-items: flex-end; gap: 0; margin-left: 4px; }
+.mkt-bigpx.mkt-up { color: #5fae6b; }
+.mkt-bigpx.mkt-down { color: #c0564a; }
+.mkt-chgline { display: flex; align-items: baseline; gap: 6px; }
+.mkt-chgabs { font-size: 11px; font-variant-numeric: tabular-nums; }
+/* symbol tag in list rows */
+.mkt-symtag {
+  display: inline-block; min-width: 34px; margin-right: 8px; font-size: 10.5px; font-weight: 800;
+  letter-spacing: 0.5px; color: #e8d8ae; opacity: 0.9;
+}
+/* chart + right-rail workspace */
+.tt-main { display: flex; gap: 14px; min-height: 0; margin: 6px 0 4px; }
+.tt-main .ex-chart { flex: 1; min-width: 0; height: 292px; margin: 0; }
+.tt-rail { flex: 0 0 224px; display: flex; flex-direction: column; min-height: 0; }
+.tt-book { min-height: 0; }
+.tt-book2 { display: flex; gap: 10px; }
+.tt-book-col { flex: 1; min-width: 0; }
+.tt-book-cap {
+  font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 8px 4px;
+}
+.tt-desc { font-size: 12.5px; line-height: 1.55; opacity: 0.8; margin: 2px 0 8px; }
+.mkt-gold { color: #e8d8ae; }
+/* the price leads the stat bar, sized like the headline it is — label,
+   value and day change sit centered on one line, change keeps its colors */
+.mkt-stat-px { flex-direction: row; align-items: center; gap: 7px; }
+.mkt-stat-px b { font-size: 16px; font-weight: 800; }
+.mkt-stat-px .mkt-chg { font-size: 12.5px; }
+/* the whole workstation fits the panel: chart gives up height so the ticket
+   and book sit on screen without scrolling */
+.market-panel .ex-chart { height: 236px; margin: 4px 0 6px; }
+.market-panel .mkt-statbar { margin-bottom: 6px; }
+.market-panel .mkt-header { padding-bottom: 7px; margin-bottom: 7px; }
+.market-panel .mkt-cols { margin-top: 8px; }
+.mkt-statbar .mkt-stat b { font-variant-numeric: tabular-nums; }
 
 /* ---------- workers panel ---------- */
 .workers-panel {
@@ -862,7 +907,7 @@ select.lp-input { cursor: pointer; }
 .mkt-row[data-c]:hover, .dl-row:hover, .ex-item:hover { background: var(--raised-hi); }
 .mkt-order, .ex-mine { background: var(--raised); border-radius: var(--r-sm); }
 .mkt-stat { border-right: 1px solid var(--line); }
-.mkt-stat span { color: var(--faint); font-size: 10px; letter-spacing: 0.6px; }
+.mkt-stat > span:first-child { color: var(--faint); font-size: 10px; letter-spacing: 0.6px; }
 .ex-spread, .mkt-spread {
   border-top: 1px dashed var(--line-hi); border-bottom: 1px dashed var(--line-hi); color: var(--faint);
 }

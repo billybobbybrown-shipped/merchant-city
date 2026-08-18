@@ -28,7 +28,13 @@ export const timeframeButtons = (active: string) =>
   ).join("");
 
 export const fmtPrice = (v: number) =>
-  "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  "$" +
+  v.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    // sub-$1 assets move in sub-penny ticks — two decimals would render a
+    // living market as one flat number
+    maximumFractionDigits: v < 1 ? 4 : 2,
+  });
 
 const UP = "#26a69a"; // real-terminal teal/red palette
 const DOWN = "#ef5350";
@@ -259,7 +265,7 @@ function renderChart(canvas: HTMLCanvasElement, st: ChartView) {
       // quiet bucket: full-width flat candle — adjacent ones merge into a
       // solid unbroken line at the carried price
       c.fillStyle = up ? "rgba(38,166,154,0.8)" : "rgba(239,83,80,0.8)";
-      c.fillRect(i * bw - 0.25, y(d.c) - 1, bw + 0.5, 2);
+      c.fillRect(x(i) - bw / 2 - 0.25, y(d.c) - 1, bw + 0.5, 2);
       return;
     }
     // wick

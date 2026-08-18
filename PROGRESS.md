@@ -1059,3 +1059,71 @@ rate (`dps × 52 / price`), the weekly per-share amount, and days until the
 next payment; the company panel's dividend policy input is now "% / year"
 (0-10, step 0.5). Verified over a full period: all seven income names paid
 ~80 holders each, measured yields 0.94-6.41% against targets of 1-6.5%.
+
+## Economy panel wiring fixes (Aug 17)
+
+The Goods tab's "made" column was chronically zero: craft resolution DELETES
+the craft row, and the day-close snapshot counted rows still in the table —
+so any craft resolved before the close (nearly all of them) was invisible.
+Production is now recorded by `resolveCrafts` itself into the day's
+`stat_commodity` row at the moment goods land in the racks; the snapshot only
+ADDS active source-site yields and fills in consumption (increment, not
+overwrite). And "avg rent" now averages the housing rents citizens actually
+paid this game day from the ledger, instead of reading the commercial
+tenancy roll, which is empty.
+
+## Companies run like companies (Aug 17)
+
+**Managers price the shelves** — for players and NPCs alike. Any shop with a
+manager on staff gets sell-through repricing each game day: flying off the
+shelf = +5%, gathering dust = −4%. No reference tables; the standing price is
+wherever the last adjustment left it (restocks explicitly keep it). NPC
+companies now hire managers; a new listing opens at market-rate × 1.15 and
+belongs to the manager after that.
+
+**Shoppers choose softly** — weighted choice (softmax over offer scores)
+replaced winner-take-all. An overpriced shop loses custom gradually instead
+of flatlining; mispricing slows a business, it doesn't execute it.
+
+**Every line answers to its own P&L** (`company_lines` table): revenue at the
+till minus its exchange input costs minus its payroll share, reviewed every 7
+game days. Three straight losing reviews = exit — clearance sale at −25%,
+bids pulled, line closed (never the last line standing). Closed lines reopen
+when the market margin returns; new launches are gated on the same on-paper
+margin check (a day's output at market rates must beat a day's inputs by $60).
+
+**Dividend cuts** — a payer that lost money all period halves its declared
+rate (the classic income-stock headline). Rates recover through the normal
+±25% smoothing once operations earn.
+
+**Wages are a market rate** — reservation floor + a tightness premium
+(open jobs vs idle citizens), used by every NPC hire. Stock terminal
+fundamentals fold property+inventory into one Assets row.
+
+Verified over 25 game days: dividend cuts firing on unprofitable names, 8
+company managers hired, wages spread 46-52 by tightness, flour already
+showing divergent shop prices (5.28 vs 9.75) as managers feel out demand.
+
+## Vertical integration — companies own the whole chain (Aug 17)
+
+Removing the city from the commodity exchange left a hole a sped-up sim
+exposed: with no players selling, NOTHING produced raw materials — shelves
+went empty citywide, retail flatlined at zero, companies bled wages into an
+economy that couldn't pay them back.
+
+The fix honors the original design ("let them own the whole production chain
+if they choose"): a company whose input bids keep starving can CHOOSE to
+integrate upstream — buy a vacant lot, `setupSource` the right farm/quarry,
+put a delivery pad on it, run a haul route to the shop, hire farmers/miners
+(2) and a hauler at market wage. Where players fill the bids cheaply, boards
+mostly never bother — integration is the market's answer to scarcity, not a
+script. Field surpluses beyond the works' needs go onto the exchange at the
+going rate, so company farms become the raw supply side other companies (and
+players) buy from. Grocer-style retail lines (carrots, corn) integrate the
+same way.
+
+Sim proof (cloned world, ~36 game days accelerated): 9 company production
+sites chosen (3 wheat farms, 2 cotton fields, tobacco, carrots, iron+stone
+quarries), employment 24→66, shelf stock cycling, retail unfrozen and
+climbing, citizen wealth up on real wages. `workforce.ensureStaffed` learned
+null lots for employer-level hauler hires; companyOps gained `logistics`.

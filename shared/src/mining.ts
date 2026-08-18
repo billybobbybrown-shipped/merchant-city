@@ -189,12 +189,16 @@ export interface CoinDef {
   maxSupply: number;
   genesis: number;
   baseReward: number; // coins a day at the start of the schedule
+  // slice of citizen money this coin's float represents — the anchor its
+  // fair value (and so its launch price) is computed from. Three different
+  // weights + three different supplies = three genuinely different prices.
+  monetaryShare: number;
 }
 
 export const COINS: CoinDef[] = [
-  { code: "duc", name: "Ducat", symbol: "◈", maxSupply: 20_000_000, genesis: 2_000_000, baseReward: 1_600 },
-  { code: "obl", name: "Obol", symbol: "◎", maxSupply: 50_000_000, genesis: 5_000_000, baseReward: 5_000 },
-  { code: "tid", name: "Tiderium", symbol: "⬡", maxSupply: 100_000_000, genesis: 12_000_000, baseReward: 11_000 },
+  { code: "duc", name: "Ducat", symbol: "◈", maxSupply: 2_000_000, genesis: 200_000, baseReward: 160, monetaryShare: 0.45 },
+  { code: "obl", name: "Obol", symbol: "◎", maxSupply: 5_000_000, genesis: 500_000, baseReward: 500, monetaryShare: 0.2 },
+  { code: "tid", name: "Tiderium", symbol: "⬡", maxSupply: 10_000_000, genesis: 1_200_000, baseReward: 1_100, monetaryShare: 0.1 },
 ];
 
 export const coinByCode = (code: string) => COINS.find((c) => c.code === code);

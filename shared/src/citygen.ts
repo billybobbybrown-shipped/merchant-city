@@ -16,6 +16,9 @@ export interface LotDef {
   zone: Zone;
   value: number;
   facing: number;
+  // open land: a courtyard or park parcel — buyable and workable like any
+  // lot, but it fronts no street, grows no city building, and keeps grass
+  yard?: boolean;
 }
 
 export interface BlockDef {
@@ -69,7 +72,10 @@ function arterials(rng: RNG, size: number): number[] {
     if (pos >= size - 18) break;
     lines.push(pos);
   }
-  lines.push(size - 4);
+  // the same 2-tile margin the first arterial gets: room for the outer
+  // sidewalk band, and crossings keep road beyond the junction on all four
+  // sides — which is what qualifies them for intersection boxes
+  lines.push(size - 6);
   return lines;
 }
 
@@ -196,14 +202,16 @@ export function generateCity(seed: number, size = CITY_SIZE): CityMap {
   const widthFor: Record<Zone, number> = { commercial: 5, mixed: 5, residential: 5, industrial: 10, park: 0 };
   const depthFor: Record<Zone, number> = { commercial: 7, mixed: 6, residential: 6, industrial: 9, park: 0 };
 
-  const addLot = (x0: number, y0: number, w: number, h: number, zone: Zone, facing: number) => {
+  const addLot = (x0: number, y0: number, w: number, h: number, zone: Zone, facing: number, yard = false) => {
     if (w < 3 || h < 3) return;
     const proximity =
       1 + 1.5 * Math.max(0, 1 - Math.hypot(x0 + w / 2 - center, y0 + h / 2 - center) / (size * 0.7));
     const value = Math.round(w * h * ZONE_BASE_VALUE[zone] * proximity);
-    lots.push({ id: lotId++, x: x0, y: y0, w, h, zone, value, facing });
-    for (let y = y0; y < y0 + h; y++)
-      for (let x = x0; x < x0 + w; x++) if (at(x, y) === Tile.Grass) set(x, y, Tile.Lot);
+    lots.push({ id: lotId++, x: x0, y: y0, w, h, zone, value, facing, ...(yard ? { yard: true } : {}) });
+    const paint = !yard;
+    if (paint)
+      for (let y = y0; y < y0 + h; y++)
+        for (let x = x0; x < x0 + w; x++) if (at(x, y) === Tile.Grass) set(x, y, Tile.Lot);
   };
 
   // carve one strip into lots of jittered widths along its street axis;
@@ -226,16 +234,22 @@ export function generateCity(seed: number, size = CITY_SIZE): CityMap {
       let w = Math.min(len - pos, Math.max(3, target + rint(r, -1, 3)));
       if (chance(r, 0.14)) w = Math.min(len - pos, w * 2); // double-wide parcel
       if (len - pos - w < 3) w = len - pos;
-      if (!chance(r, 0.04)) {
-        if (horizontal) addLot(sx + pos, sy, w, sh, zone, facing);
-        else addLot(sx, sy + pos, sw, w, zone, facing);
-      }
+      // every parcel is real land — no randomly skipped gaps that read as
+      // buyable grass but aren't (the draw stays so layouts don't reshuffle)
+      chance(r, 0.04);
+      if (horizontal) addLot(sx + pos, sy, w, sh, zone, facing);
+      else addLot(sx, sy + pos, sw, w, zone, facing);
       pos += w;
     }
   };
 
   for (const b of zoned) {
-    if (b.zone === "park") continue;
+    if (b.zone === "park") {
+      // a park is one big green parcel: buyable like everything else, but its
+      // ground stays grass — it's a park until somebody develops it
+      addLot(b.x + 1, b.y + 1, b.w - 2, b.h - 2, "park", FACE_S, true);
+      continue;
+    }
     // per-block rng: a block always subdivides the same way, independent of the map
     const br = mulberry32(hashSeed(seed, b.x, b.y, 0xb10c));
     // interior after the sidewalk ring
@@ -268,18 +282,30 @@ export function generateCity(seed: number, size = CITY_SIZE): CityMap {
       continue;
     }
 
-    // perimeter: north + south rows full width, east + west fill the middle band
+    // perimeter: north + south rows full width, east + west fill the middle
+    // band. Remainders never survive as orphan grass: a band too thin for
+    // its own row is swallowed by the south row, a sliver of a courtyard
+    // widens the east strip, and a real courtyard becomes parcels itself.
+    let bandH = bh - 2 * d;
+    let dSouth = d;
+    if (bandH > 0 && bandH < 3) {
+      dSouth = d + bandH;
+      bandH = 0;
+    }
     stripLots(br, bx, by, bw, d, true, FACE_N, b.zone);
-    stripLots(br, bx, by + bh - d, bw, d, true, FACE_S, b.zone);
+    stripLots(br, bx, by + bh - dSouth, bw, dSouth, true, FACE_S, b.zone);
     const bandY = by + d;
-    const bandH = bh - 2 * d;
     if (bandH >= 3 && bw >= 2 * d + 3) {
+      let dEast = d;
+      const courtW = bw - 2 * d;
+      if (courtW > 0 && courtW < 3) dEast = d + courtW;
       stripLots(br, bx, bandY, d, bandH, false, FACE_W, b.zone);
-      stripLots(br, bx + bw - d, bandY, d, bandH, false, FACE_E, b.zone);
+      stripLots(br, bx + bw - dEast, bandY, dEast, bandH, false, FACE_E, b.zone);
+      const cw = bw - d - dEast;
+      if (cw >= 3) addLot(bx + d, bandY, cw, bandH, b.zone, FACE_S, true);
     } else if (bandH >= 3) {
       stripLots(br, bx, bandY, bw, bandH, false, FACE_W, b.zone);
     }
-    // whatever remains in the middle stays grass — a courtyard
   }
 
   const blocks: BlockDef[] = zoned.map((b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, zone: b.zone }));

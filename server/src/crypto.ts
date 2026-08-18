@@ -98,7 +98,9 @@ export class CryptoStore {
     if (!Number.isInteger(qty) || qty < 1 || qty > 1_000_000) throw new EconomyError("bad quantity");
     if (market) price = side === "buy" ? 1_000_000 : 0.01;
     else {
-      price = Math.round(price * 100) / 100;
+      // coins trade sub-$1 — a whole-cent grid at $0.60 is a 1.7% tick that
+      // pins every candle's wicks to the same two lines. Tenth-of-a-cent ticks.
+      price = Math.round(price * 10000) / 10000;
       if (!(price > 0) || price > 1_000_000) throw new EconomyError("bad price");
     }
     const client = await pool.connect();

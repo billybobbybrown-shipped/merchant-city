@@ -228,6 +228,16 @@ async function boot() {
     }
     if (craftPanel.lotId === lotId) craftPanel.render(data);
   };
+  // whether the player operates a lot: their own, their company's, or rented.
+  // Everything private — storage, machines, docks, rack contents — keys off
+  // this; visitors get the shop front and the lot panel, nothing else.
+  const operates = (lotId: number): boolean => {
+    const st = lots.state.get(lotId);
+    if (!st) return false;
+    if (st.tenantId && actingIds.has(st.tenantId)) return true;
+    return st.ownerType === "player" && actingIds.has(st.ownerId ?? "");
+  };
+
   const interior = new InteriorMode(
     engine,
     ui,
@@ -235,34 +245,41 @@ async function boot() {
       place: (lotId, item, x, y, rot, floor) => room.send("placeItem", { lotId, item, x, y, rot, floor }),
       remove: (lotId, furnId) => room.send("removeItem", { lotId, furnId }),
       openStorage: (lotId, label, furnId) => {
+        if (!operates(lotId)) return; // not your racks, not your business
         craftPanel.close();
         shopPanel.close();
         storagePanel.open(lotId, label, furnId);
         void refreshFixtures(lotId);
       },
       openCraft: (lotId, station) => {
+        if (!operates(lotId)) return; // someone else's machines
         storagePanel.close();
         shopPanel.close();
         craftPanel.open(lotId, station);
         void refreshFixtures(lotId);
       },
       walk: (x, z) => room.send("move", { x, y: z }),
+      canEdit: (lotId) => operates(lotId),
       elevate: (y) => players.elevate(room.sessionId, y),
       openDock: (lotId) => {
         storagePanel.close();
         craftPanel.close();
         shopPanel.close();
+        // a stranger clicking a delivery pad sees the property, not the cargo
+        if (!operates(lotId)) {
+          const lot = lots.defs.get(lotId);
+          const st = lots.state.get(lotId);
+          if (lot && st) lotPanel.open(lot, st);
+          return;
+        }
         dockPanel.open(lotId);
       },
       openRack: (lotId, furnId) => {
+        if (!operates(lotId)) return; // a mining rack's insides are private
         storagePanel.close();
         craftPanel.close();
         shopPanel.close();
-        const st = lots.state.get(lotId);
-        const manage =
-          (st?.ownerType === "player" && actingIds.has(st.ownerId ?? "")) ||
-          (!!st?.tenantId && actingIds.has(st.tenantId));
-        rackPanel.open(lotId, furnId, manage);
+        rackPanel.open(lotId, furnId, true);
       },
       openShop: (lotId, furnId) => {
         storagePanel.close();
@@ -316,6 +333,7 @@ async function boot() {
     ui,
     {
       build: (lotId, rects, floors) => room.send("build", { lotId, rects, floors }),
+      buildTemplate: (lotId, template) => room.send("buildTemplate", { lotId, template }),
       setupSource: (lotId, type, rects) => room.send("setupSource", { lotId, type, rects }),
       buildDock: (lotId, x, y) => room.send("buildDock", { lotId, x, y }),
       demolishArea: (lotId, rect) => room.send("demolishArea", { lotId, rect }),
@@ -406,11 +424,13 @@ async function boot() {
     if (workersPanel.visible) void workersPanel.refresh();
   });
   const stocksPanel = new StocksPanel(ui, selfId, {
-    trade: (company, side, qty) => room.send("tradeStock", { company, side, qty, market: true }),
+    trade: (company, side, qty, price) =>
+      room.send("tradeStock", price !== undefined ? { company, side, qty, price } : { company, side, qty, market: true }),
     cancel: (orderId) => room.send("cancelStockOrder", { orderId }),
   });
   const cryptoPanel = new CryptoPanel(ui, selfId, {
-    trade: (side, qty, coin) => room.send("tradeCoin", { side, qty, market: true, coin }),
+    trade: (side, qty, coin, price) =>
+      room.send("tradeCoin", price !== undefined ? { side, qty, coin, price } : { side, qty, market: true, coin }),
     cancel: (orderId) => room.send("cancelCoinOrder", { orderId }),
   });
   // only one overlay at a time — panels never stack on each other.
@@ -585,9 +605,14 @@ async function boot() {
   // dev: ?interior=lotId jumps straight into interior edit mode
   const interiorParam = Number(params.get("interior"));
   if (Number.isInteger(interiorParam) && interiorParam > 0) {
-    const lot = lots.defs.get(interiorParam);
-    const def = buildingDefFor(interiorParam);
-    if (lot && def) setTimeout(() => interior.enter(lot, def), 800);
+    // lot STATE arrives over the wire after the map does — retry briefly
+    const tryEnter = (n = 0) => {
+      const lot = lots.defs.get(interiorParam);
+      const def = buildingDefFor(interiorParam);
+      if (lot && def) void interior.enter(lot, def);
+      else if (n < 20) setTimeout(() => tryEnter(n + 1), 500);
+    };
+    setTimeout(() => tryEnter(), 800);
   }
 
   // dev: freeze time of day with ?tod=0..1
@@ -610,7 +635,11 @@ async function boot() {
     const dockLot = constructions.dockAtWorld(x, z);
     if (dockLot !== null) {
       lotPanel.close();
-      dockPanel.open(dockLot);
+      if (!operates(dockLot)) {
+        const dl = lots.defs.get(dockLot);
+        const dst = lots.state.get(dockLot);
+        if (dl && dst) lotPanel.open(dl, dst);
+      } else dockPanel.open(dockLot);
       return;
     }
     dockPanel.close();

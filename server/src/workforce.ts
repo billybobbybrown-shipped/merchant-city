@@ -1,3 +1,4 @@
+import { reservationWage } from "@mc/shared";
 import { pool } from "./db.js";
 import { EconomyError } from "./errors.js";
 import { LotStore } from "./lots.js";
@@ -305,13 +306,30 @@ export class WorkforceStore {
 
   // NPC-employer convenience: make sure (lot, role) is covered by a worker or
   // an open preset offer — entrepreneurs and companies staff through this
-  async ensureStaffed(employer: number, lotId: number, role: JobRole, wage: number, count = 1): Promise<void> {
+  // The going rate for labor: the reservation floor plus a tightness premium.
+  // Lots of open jobs chasing few idle citizens bids wages up; a slack market
+  // sits near the floor. Nobody pays a scripted number.
+  async marketWage(): Promise<number> {
+    const r = await pool.query(
+      "select count(*) filter (where employer_entity is null) as idle from npcs where world_id = $1",
+      [WORLD_ID]
+    );
+    const open = await pool.query(
+      "select coalesce(sum(slots), 0) as s from hire_offers where world_id = $1",
+      [WORLD_ID]
+    );
+    const idle = Math.max(1, Number(r.rows[0].idle));
+    const tightness = Math.min(1.5, Number(open.rows[0].s) / idle);
+    return Math.round(reservationWage("worker") * (1 + tightness * 0.5));
+  }
+
+  async ensureStaffed(employer: number, lotId: number | null, role: JobRole, wage: number, count = 1): Promise<void> {
     const assigned = await pool.query(
-      "select count(*) as n from npcs where employer_entity = $1 and employer_lot = $2 and job_role = $3",
+      "select count(*) as n from npcs where employer_entity = $1 and employer_lot is not distinct from $2 and job_role = $3",
       [employer, lotId, role]
     );
     const offered = await pool.query(
-      "select coalesce(sum(slots), 0) as n from hire_offers where employer_entity = $1 and assign_lot = $2 and assign_role = $3",
+      "select coalesce(sum(slots), 0) as n from hire_offers where employer_entity = $1 and assign_lot is not distinct from $2 and assign_role = $3",
       [employer, lotId, role]
     );
     const short = count - Number(assigned.rows[0].n) - Number(offered.rows[0].n);

@@ -1,4 +1,4 @@
-import { BASE_PRICE, PermitCategory, retailPrice } from "@mc/shared";
+import { BASE_PRICE, PermitCategory, retailPrice, coinByCode, recipeById } from "@mc/shared";
 import { pool } from "./db.js";
 import { EconomyError } from "./errors.js";
 import { CITY_ENTITY, credit } from "./accounts.js";
@@ -14,6 +14,18 @@ import type { CryptoStore } from "./crypto.js";
 
 const WORLD_ID = 1;
 
+interface Chain {
+  machines: string[];
+  inputs: Array<{ item: string; min: number; batch: number }>;
+  ladder: Array<[string, number]>;
+}
+
+// one product a company makes and sells: its market name and its works
+interface ProductLine {
+  product: string;
+  chain: Chain;
+}
+
 interface SeedDef {
   name: string;
   product: string | null; // null = ops arrive with a later phase (crypto)
@@ -24,16 +36,45 @@ interface SeedDef {
   // The production arm: machines to own, raw inputs to buy on the exchange,
   // and the recipe ladder from raws to the product, in dependency order. A
   // company without one lives off the market alone.
-  chain?: {
-    machines: string[];
-    inputs: Array<{ item: string; min: number; batch: number }>;
-    ladder: Array<[string, number]>;
-  };
+  chain?: Chain;
+  // the catalog a company MAY expand into — never forced: an established
+  // company rolls the dice each ops day on launching one more line
+  expansions?: ProductLine[];
 }
 
 // Share counts vary, but stay banded by company size, so a bigger company
 // still generally carries a higher share price while no two listings look
 // identical. Float (the tradable slice) varies per company too.
+// which production site grows/digs which raw — the map a board consults
+// when it decides to own the whole chain instead of buying on the exchange
+const ITEM_SOURCE: Record<string, string> = {
+  wheat: "farm_wheat",
+  corn: "farm_corn",
+  carrots: "farm_carrots",
+  tobacco: "farm_tobacco",
+  cotton: "cotton_field",
+  stone: "quarry_stone",
+  iron_ore: "quarry_iron",
+  gold_ore: "quarry_gold",
+};
+
+// Vesper's whole electronics range runs through one works — every product is
+// the same base chain carried a different distance. Gold-bearing parts add
+// gold ore to the shopping list.
+const V_MACHINES = ["rack_l", "smelter", "fabricator", "electronics_bench"];
+const V_BASE_LADDER: Array<[string, number]> = [
+  ["iron", 2], ["silicon_ingot", 2], ["wiring", 3], ["silicon", 2],
+  ["transistor", 2], ["capacitor", 2], ["circuit_board", 2],
+];
+function vLine(product: string, tail: Array<[string, number]>, gold = false): ProductLine {
+  const inputs = [
+    { item: "stone", min: 10, batch: 24 },
+    { item: "iron_ore", min: 8, batch: 20 },
+  ];
+  if (gold) inputs.push({ item: "gold_ore", min: 3, batch: 6 });
+  return { product, chain: { machines: V_MACHINES, inputs, ladder: [...V_BASE_LADDER, ...tail] } };
+}
+
 const TIERS = {
   small: { capital: [1_500_000, 3_000_000], shares: [500_000, 750_000] },
   mid: { capital: [5_000_000, 12_000_000], shares: [1_000_000, 1_250_000] },
@@ -57,18 +98,28 @@ const SEEDS: SeedDef[] = [
   {
     name: "Atlas Provisions", product: "bread", tier: "large", dividend: 0.045,
     chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 12, batch: 30 }], ladder: [["flour", 3], ["bread", 4]] },
+    expansions: [{ product: "flour", chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 8, batch: 20 }], ladder: [["flour", 4]] } }],
   },
   {
     name: "Consolidated Bakeries", product: "bread", tier: "mid", dividend: 0.025,
     chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 10, batch: 24 }], ladder: [["flour", 3], ["bread", 3]] },
+    expansions: [{ product: "flour", chain: { machines: ["rack_l", "oven"], inputs: [{ item: "wheat", min: 8, batch: 20 }], ladder: [["flour", 3]] } }],
   },
   {
     name: "Harbor Retail Group", product: "shirt", tier: "large", dividend: 0.035,
     chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 12, batch: 30 }], ladder: [["fabric", 3], ["shirt", 3]] },
+    expansions: [
+      { product: "rug", chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 8, batch: 20 }], ladder: [["fabric", 3], ["rug", 2]] } },
+      { product: "fabric", chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 8, batch: 20 }], ladder: [["fabric", 3]] } },
+    ],
   },
   {
     name: "Meridian Textiles", product: "shirt", tier: "mid", dividend: 0.015,
     chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 10, batch: 24 }], ladder: [["fabric", 3], ["shirt", 3]] },
+    expansions: [
+      { product: "rug", chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 8, batch: 20 }], ladder: [["fabric", 2], ["rug", 2]] } },
+      { product: "fabric", chain: { machines: ["rack_l", "loom"], inputs: [{ item: "cotton", min: 8, batch: 20 }], ladder: [["fabric", 3]] } },
+    ],
   },
   {
     name: "Vesper Electronics", product: "phone", tier: "mid", dividend: 0,
@@ -77,19 +128,38 @@ const SEEDS: SeedDef[] = [
       inputs: [{ item: "stone", min: 20, batch: 40 }, { item: "iron_ore", min: 16, batch: 30 }],
       ladder: [["iron", 3], ["silicon_ingot", 2], ["wiring", 4], ["silicon", 1], ["capacitor", 2], ["transistor", 1], ["circuit_board", 2], ["phone", 2]],
     },
+    expansions: [
+      vLine("ram_ddr4", [["ram_ddr4", 2]]),
+      vLine("ram_ddr5", [["ram_ddr5", 1]]),
+      vLine("ram_ecc", [["gold_ingot", 1], ["ram_ecc", 1]], true),
+      vLine("cpu_basic", [["cpu_basic", 2]]),
+      vLine("cpu_adv", [["cpu_basic", 2], ["gold_ingot", 1], ["cpu_adv", 1]], true),
+      vLine("gpu", [["cpu_basic", 2], ["gold_ingot", 1], ["cpu_adv", 1], ["cooling_fan", 1], ["gpu", 1]], true),
+      vLine("asic", [["cpu_basic", 2], ["gold_ingot", 2], ["cpu_adv", 1], ["cooling_fan", 1], ["gpu", 2], ["asic", 1]], true),
+      vLine("psu_unit", [["psu_unit", 2]]),
+      vLine("cooling_fan", [["cooling_fan", 2]]),
+      vLine("cooling_liquid", [["cooling_fan", 2], ["cooling_liquid", 1]]),
+    ],
   },
   {
     name: "Crestfield Spirits", product: "beer", permit: "liquor", tier: "small", dividend: 0.035,
     chain: { machines: ["rack_l", "brewery"], inputs: [{ item: "wheat", min: 10, batch: 24 }], ladder: [["beer", 3]] },
+    expansions: [{ product: "whiskey", chain: { machines: ["rack_l", "brewery"], inputs: [{ item: "corn", min: 10, batch: 24 }], ladder: [["whiskey", 2]] } }],
   },
   {
     name: "Bluebird Tobacco Co", product: "cigarettes", permit: "tobacco", tier: "small", dividend: 0.065,
     chain: { machines: ["rack_l", "curing_barn"], inputs: [{ item: "tobacco", min: 10, batch: 24 }], ladder: [["cured_tobacco", 2], ["cigarettes", 3]] },
+    expansions: [{ product: "cigars", chain: { machines: ["rack_l", "curing_barn"], inputs: [{ item: "tobacco", min: 8, batch: 20 }], ladder: [["cured_tobacco", 2], ["cigars", 2]] } }],
   },
   {
     name: "Ironline Provisions", product: "carrots", tier: "small", dividend: 0,
     // a pure retailer: no works, but goods still need somewhere to sit
     chain: { machines: ["rack_l"], inputs: [], ladder: [] },
+    expansions: [
+      { product: "corn", chain: { machines: ["rack_l"], inputs: [], ladder: [] } },
+      { product: "bread", chain: { machines: ["rack_l"], inputs: [], ladder: [] } },
+      { product: "flour", chain: { machines: ["rack_l"], inputs: [], ladder: [] } },
+    ],
   },
   { name: "Nordvik Mining Systems", product: null, tier: "mid", dividend: 0.01 },
   { name: "HashWorks Mining", product: null, tier: "large", dividend: 0 },
@@ -110,6 +180,9 @@ export class CompanyOps {
     private companies: CompaniesStore,
     private stocks: StocksStore
   ) {}
+
+  // wired at boot — farm docks and haul routes run through logistics
+  logistics?: import("./logistics.js").LogisticsStore;
 
   async seed(): Promise<void> {
     const existing = await pool.query("select count(*) as n from stocks");
@@ -207,41 +280,22 @@ export class CompanyOps {
     await this.companies.load();
   }
 
-  // The city runs an industrial supply depot: basic materials are always on
-  // the exchange at a premium, so no production chain can deadlock waiting for
-  // a supplier. Players undercut the city to win that business.
-  async cityIndustrialSupply(): Promise<void> {
-    // Industrial staples plus the farm raws the listed companies live on. The
-    // city sells at DOUBLE base — a supplier of last resort, never the best
-    // one — so any player selling their own crop or ore undercuts it and the
-    // companies' standing bids become real demand for player production.
-    const STAPLES = ["iron", "planks", "bricks", "fuel", "iron_ore", "wood", "stone", "wheat", "cotton", "tobacco"];
-    for (const item of STAPLES) {
-      const open = await pool.query(
-        `select coalesce(sum(qty), 0) as q from orders
-          where world_id = $1 and asset_type = 'item' and item = $2 and side = 'sell' and owner_entity = $3`,
-        [WORLD_ID, item, CITY_ENTITY]
-      );
-      const have = Number(open.rows[0].q);
-      if (have >= 40) continue;
-      const qty = 80 - have;
-      await pool.query(
-        `insert into inventories (world_id, holder_type, holder_id, item, qty)
-         values ($1,'entity',$2,$3,$4)
-         on conflict (world_id, holder_type, holder_id, item) do update set qty = inventories.qty + $4`,
-        [WORLD_ID, String(CITY_ENTITY), item, qty]
-      );
-      const px = Math.round((BASE_PRICE[item] ?? 10) * 2 * 100) / 100;
-      await this.market.place(CITY_ENTITY, "sell", item, qty, px).catch((e) =>
-        console.error("[city supply]", item, e?.message ?? e)
-      );
-    }
+  // The city has NO seat on the commodity exchange: no depot, no supply of
+  // last resort. Companies and players find every price between themselves.
+  // This sweep retires any city goods orders still resting from older worlds
+  // (through cancel, so escrow unwinds cleanly) — it is a no-op once clean.
+  async retireCityDepot(): Promise<void> {
+    const rows = await pool.query(
+      "select id from orders where world_id = $1 and owner_entity = $2 and asset_type = 'item'",
+      [WORLD_ID, CITY_ENTITY]
+    );
+    for (const row of rows.rows) await this.market.cancel(CITY_ENTITY, Number(row.id)).catch(() => {});
   }
 
   // one operating pass per game day: run every NPC company like a well-funded
   // entrepreneur — real lots, real staff, real exchange demand, real prices
   async runDay(): Promise<void> {
-    await this.cityIndustrialSupply().catch((e) => console.error("[companyOps] city supply", e));
+    await this.retireCityDepot().catch((e) => console.error("[companyOps] depot retire", e));
     const rows = await pool.query(
       `select c.entity_id, c.registered_name from companies c where c.npc_operated = true`
     );
@@ -299,10 +353,10 @@ export class CompanyOps {
         console.log("[companyOps] Nordvik received genesis materials");
       }
     }
-    for (const raw of ["iron", "stone"] as const)
+    for (const raw of ["iron", "stone", "gold_ore"] as const)
       if ((store[raw] ?? 0) < 12 * benches && balance > 400 && !(await this.hasOpenBuy(companyEid, raw)))
         await this.market
-          .place(companyEid, "buy", raw, 24 * benches, Math.round((BASE_PRICE[raw] ?? 8) * 2.1 * 100) / 100)
+          .place(companyEid, "buy", raw, 24 * benches, await this.bidPrice(raw, (store[raw] ?? 0) === 0, null))
           .catch(() => {});
     // haul exchange fills from the pocket into the workshop
     const pocket = await this.goods.inventory("entity", String(companyEid));
@@ -312,10 +366,15 @@ export class CompanyOps {
     // keep the product ladder running, but don't pile work on a bench that's
     // already busy — a queued craft is capital sitting idle
     const queued = await pool.query("select count(*) as n from crafts where lot_id = $1", [bizLot]);
+    // a second bench is Nordvik CHOOSING to broaden the catalog: memory
+    // modules join the component list once the works has grown into them
+    const catalog: Array<readonly [string, number]> = [];
+    if (benches >= 2) catalog.push(["ram_ddr4", 2], ["ram_ddr5", 1]);
+    if (benches >= 3) catalog.push(["gpu", 1]);
     if (Number(queued.rows[0].n) < 8 * benches)
       // in dependency order: raw -> fabricated parts -> finished components. A
       // step with nothing to work on just throws and the ladder moves on.
-      for (const [recipe, batch] of [
+      for (const [recipe, batch] of ([
         ["silicon_ingot", 2],
         ["wiring", 4],
         ["silicon", 1],
@@ -326,15 +385,15 @@ export class CompanyOps {
         ["psu_unit", 2],
         ["cooling_fan", 2],
         ["cpu_adv", 1],
-      ] as const)
+      ] as const).concat(catalog as never))
         await this.goods.craft(companyEid, bizLot, recipe, batch * benches).catch(() => {});
     // list finished components: workshop -> pocket -> exchange ask
     const finished = await this.goods.inventory("lot", String(bizLot));
-    for (const comp of ["cpu_basic", "cpu_adv", "psu_unit", "cooling_fan", "cooling_liquid"]) {
+    for (const comp of ["cpu_basic", "cpu_adv", "psu_unit", "cooling_fan", "cooling_liquid", "ram_ddr4", "ram_ddr5", "gpu"]) {
       const n = finished[comp] ?? 0;
       if (n <= 0) continue;
       await this.goods.transfer(companyEid, bizLot, comp, n, false).catch(() => {});
-      const ask = Math.round((BASE_PRICE[comp] ?? 20) * 1.15 * 100) / 100;
+      const ask = Math.round((await this.market.refPrice(comp)) * 100) / 100;
       await this.market.place(companyEid, "sell", comp, n, ask).catch(() => {});
     }
   }
@@ -372,8 +431,8 @@ export class CompanyOps {
         for (let i = 0; i < Math.min(need, onHand); i++)
           await this.crypto.install(companyEid, rackId, item).catch(() => {});
         if (onHand < need && balance > 200 && !(await this.hasOpenBuy(companyEid, item))) {
-          // pay up to the city depot's price so the rig never sits idle
-          const limit = Math.round((BASE_PRICE[item] ?? 30) * 2.1 * 100) / 100;
+          // a rig with an empty slot is a hungry buyer — join the market rate
+          const limit = await this.bidPrice(item, true, null);
           await this.market.place(companyEid, "buy", item, need - onHand, limit).catch(() => {});
         }
       }
@@ -417,7 +476,7 @@ export class CompanyOps {
       sell = Math.max(0, Math.min(coins, sell));
       if (sell >= 1)
         await this.crypto
-          .trade(companyEid, "sell", sell, Math.max(0.1, Math.round(px * 0.99 * 100) / 100))
+          .trade(companyEid, "sell", sell, Math.max(0.001, Math.round(px * 0.99 * 10000) / 10000))
           .catch(() => {});
     }
   }
@@ -440,7 +499,8 @@ export class CompanyOps {
       [code]
     );
     const supply = Number(r.rows[0].supply);
-    return supply > 0 ? Math.max(0.01, (Number(r.rows[0].cash) * 0.25) / supply) : 1;
+    const share = coinByCode(code)?.monetaryShare ?? 0.2;
+    return supply > 0 ? Math.max(0.01, (Number(r.rows[0].cash) * share) / supply) : 1;
   }
 
   private async avgCoinPrice(minutes: number): Promise<number | null> {
@@ -450,6 +510,120 @@ export class CompanyOps {
       [WORLD_ID, minutes]
     );
     return r.rows[0]?.v != null ? Number(r.rows[0].v) : null;
+  }
+
+  // One line's books over a review window: what its product earned at the
+  // till, minus what its inputs cost on the exchange, minus its share of the
+  // shop payroll. Real ledger rows only.
+  private async linePnl(
+    companyEid: number,
+    bizLot: number,
+    line: ProductLine,
+    nLines: number,
+    sinceSec: number
+  ): Promise<number> {
+    const rev = await pool.query(
+      `select coalesce(sum(amount), 0) as v from ledger
+        where category = 'retail_sale' and reason = $1 and ts > now() - make_interval(secs => $2)`,
+      [`${line.product} @ lot ${bizLot}`, sinceSec]
+    );
+    let inputCost = 0;
+    for (const inp of line.chain.inputs) {
+      const r = await pool.query(
+        `select coalesce(sum(l.amount), 0) as v from ledger l
+           join accounts a on a.id = l.from_account
+          where a.entity_id = $1 and l.category = 'trade'
+            and l.reason like $2 and l.ts > now() - make_interval(secs => $3)`,
+        [companyEid, `trade % ${inp.item} @ %`, sinceSec]
+      );
+      inputCost += Number(r.rows[0].v);
+    }
+    const wages = await pool.query(
+      `select coalesce(sum(l.amount), 0) as v from ledger l
+         join accounts a on a.id = l.from_account
+        where a.entity_id = $1 and l.category = 'wage' and l.reason like $2
+          and l.ts > now() - make_interval(secs => $3)`,
+      [companyEid, `% lot ${bizLot}%`, sinceSec]
+    );
+    return Number(rev.rows[0].v) - inputCost - Number(wages.rows[0].v) / Math.max(1, nLines);
+  }
+
+  // What a line looks like ON PAPER at today's market prices: a day's output
+  // at the going rate minus a day's inputs at the going rate. This is the
+  // number a board reads before entering (or re-entering) a market.
+  private async lineGross(line: ProductLine): Promise<number> {
+    const outRef = await this.market.refPrice(line.product);
+    if (!line.chain.ladder.length) return 20; // pure retail: thin but real
+    const [finalRecipe, finalBatch] = line.chain.ladder[line.chain.ladder.length - 1];
+    const rec = recipeById(finalRecipe);
+    const perDayOut = (rec?.outQty ?? 1) * finalBatch;
+    let inCost = 0;
+    for (const inp of line.chain.inputs) inCost += inp.batch * (await this.market.refPrice(inp.item));
+    return perDayOut * outRef - inCost;
+  }
+
+  // VERTICAL INTEGRATION, chosen not scripted: a company whose input bids
+  // keep starving can decide to own that link of the chain — buy a vacant
+  // lot, set up the farm or quarry, put a delivery pad on it, run a haul
+  // route to the shop, and hire the field crew. In a world where players
+  // (or rival companies) fill the bids cheaply, boards mostly never bother.
+  private async ensureSourceFor(companyEid: number, seed: SeedDef, item: string, bizLot: number): Promise<void> {
+    const srcType = ITEM_SOURCE[item];
+    if (!srcType || !this.logistics) return;
+    const wage = await this.workforce.marketWage();
+
+    // already integrated? keep it staffed and routed, then done
+    for (const st of this.lots.all()) {
+      if (st.ownerType === "city" || st.ownerId !== String(companyEid)) continue;
+      if (st.source?.type !== srcType) continue;
+      const role = st.source.type.startsWith("quarry") || st.source.type === "oil_well" ? "miner" : "farmer";
+      await this.workforce.ensureStaffed(companyEid, st.id, role, wage + 2, 2).catch(() => {});
+      await this.workforce.ensureStaffed(companyEid, null, "hauler", wage + 6).catch(() => {});
+      return;
+    }
+
+    const balance = await this.balanceOf(companyEid);
+    if (balance < 15_000 || Math.random() > 0.15) return; // the choice, not a script
+
+    for (const st of this.lots.all()) {
+      if (st.ownerType !== "city" || !st.forSale) continue;
+      const lot = this.lots.lotDef(st.id);
+      if (!lot) continue;
+      const area = lot.w * lot.h;
+      if (area < 24 || area > 140 || st.price > balance * 0.15) continue;
+      try {
+        await this.lots.buy(companyEid, st.id);
+        // the field covers the plot except a strip for the loading pad
+        await this.lots.setupSource(companyEid, st.id, srcType, [
+          { x: 0, y: 0, w: lot.w, h: Math.max(2, lot.h - 2) },
+        ]);
+        await this.logistics.build(companyEid, st.id, 1, lot.h - 1).catch(() => {});
+        await this.logistics.build(companyEid, bizLot, 0, 0).catch(() => {});
+        await this.logistics.addLine(companyEid, st.id, "out", item, 40, bizLot).catch(() => {});
+        const role = srcType.startsWith("quarry") || srcType === "oil_well" ? "miner" : "farmer";
+        await this.workforce.ensureStaffed(companyEid, st.id, role, wage + 2, 2).catch(() => {});
+        await this.workforce.ensureStaffed(companyEid, null, "hauler", wage + 6).catch(() => {});
+        const { registry } = await import("./registry.js");
+        registry.broadcast("lot", this.lots.all().find((l) => l.id === st.id));
+        console.log(`[companyOps] ${seed.name} integrates upstream: ${srcType} on lot ${st.id}`);
+        return;
+      } catch {
+        /* lot didn't suit — try the next one */
+      }
+    }
+  }
+
+  // How a company prices a bid: join the going rate, pay a touch over when
+  // the racks are empty, and CLIMB a few percent per re-quote while nobody
+  // sells — an open auction against player supply. The climb stops at 3x the
+  // going rate: past that the line just waits for sellers. No fixed
+  // multipliers over any catalog number.
+  private async bidPrice(item: string, starving: boolean, existing: number | null): Promise<number> {
+    const ref = await this.market.refPrice(item);
+    let px = ref * (starving ? 1.1 : 1.02);
+    if (starving && existing !== null) px = Math.max(px, existing * 1.06);
+    px = Math.min(px, ref * 3);
+    return Math.round(px * 100) / 100;
   }
 
   // shared: make sure the company owns a usable commercial lot
@@ -540,7 +714,7 @@ export class CompanyOps {
       const tilt = (Math.random() < 0.55 ? mom : -mom) * 1.5;
       const buyBias = Math.max(0.3, Math.min(0.7, 0.5 + tilt));
       const wantsBuy = Math.random() < buyBias;
-      const px = Math.max(0.05, Math.round(ref * (1 + (Math.random() - 0.5) * 0.09) * 100) / 100);
+      const px = Math.max(0.001, Math.round(ref * (1 + (Math.random() - 0.5) * 0.09) * 10000) / 10000);
 
       if (wantsBuy) {
         const qty = Math.max(1, Math.min(Math.floor((cash * 0.15) / px), 2 + Math.floor(Math.random() * 10)));
@@ -592,22 +766,136 @@ export class CompanyOps {
           }
         }
     }
-    await this.workforce.ensureStaffed(companyEid, bizLot, "cashier", 52).catch(() => {});
+    // staff at the going labor rate — the market sets pay, not a script.
+    // The manager matters doubly now: docks AND pricing run through them.
+    const wage = await this.workforce.marketWage();
+    await this.workforce.ensureStaffed(companyEid, bizLot, "cashier", wage + 4).catch(() => {});
+    await this.workforce.ensureStaffed(companyEid, bizLot, "manager", wage + 8).catch(() => {});
 
-    // The production arm: machines on the shop floor, raw inputs bid on the
-    // exchange, the recipe ladder worked in dependency order. The exchange bid
-    // for the finished product stays open below — whichever source is
-    // actually available fills the shelf, market or works.
-    let scale = 1;
-    if (seed.chain)
-      scale = await this.produce(companyEid, bizLot, seed).catch((e): number => {
-        console.error("[companyOps] produce", seed.name, e?.message ?? e);
-        return 1;
-      });
+    // The product lines. Every company runs its founding line; the rest of
+    // its catalog is a CHOICE — an established company rolls the dice each
+    // ops day on launching one more (whiskey beside the beer, cigars beside
+    // the cigarettes, memory beside the phones). Chosen lines persist.
+    const lines: ProductLine[] = [{ product, chain: seed.chain ?? { machines: [], inputs: [], ladder: [] } }];
+    if (seed.expansions?.length) {
+      const row = await pool.query("select extra_lines from companies where entity_id = $1", [companyEid]);
+      const chosen = new Set<string>((row.rows[0]?.extra_lines ?? []) as string[]);
+      const candidates = seed.expansions.filter((x) => !chosen.has(x.product));
+      if (candidates.length && balance > 8_000 && Math.random() < 0.08) {
+        const pick = candidates[Math.floor(Math.random() * candidates.length)];
+        // a board reads the market before entering it: no launch into a
+        // product whose numbers don't work at today's prices
+        if ((await this.lineGross(pick)) > 60) {
+          await pool.query(
+            "update companies set extra_lines = array_append(extra_lines, $2) where entity_id = $1",
+            [companyEid, pick.product]
+          );
+          chosen.add(pick.product);
+          console.log(`[companyOps] ${seed.name} launches a ${pick.product} line`);
+        }
+      }
+      for (const x of seed.expansions) if (chosen.has(x.product)) lines.push(x);
+    }
 
-    // source stock on the exchange, haul, shelve, price
+    // ---- the management layer: every line answers to its own P&L ----
+    await pool.query(
+      `insert into company_lines (world_id, company_entity, product)
+       select $1, $2, unnest($3::text[]) on conflict do nothing`,
+      [WORLD_ID, companyEid, lines.map((l) => l.product)]
+    );
+    const lstate = await pool.query(
+      `select product, status, loss_reviews, extract(epoch from (now() - last_review)) as age
+         from company_lines where world_id = $1 and company_entity = $2`,
+      [WORLD_ID, companyEid]
+    );
+    const stateBy = new Map<string, { status: string; loss_reviews: number; age: number }>(
+      lstate.rows.map((r) => [r.product as string, { status: r.status, loss_reviews: Number(r.loss_reviews), age: Number(r.age) }])
+    );
+    const active: ProductLine[] = [];
+    for (const line of lines) {
+      const st = stateBy.get(line.product);
+      if (st?.status === "closed") {
+        // a closed line can come back when the market turns — the same
+        // numbers that justify entering justify re-entering
+        if (Math.random() < 0.04 && (await this.lineGross(line)) > 60) {
+          await pool.query(
+            "update company_lines set status = 'active', loss_reviews = 0, last_review = now() where world_id = $1 and company_entity = $2 and product = $3",
+            [WORLD_ID, companyEid, line.product]
+          );
+          console.log(`[companyOps] ${seed.name} reopens its ${line.product} line`);
+          active.push(line);
+        }
+        continue;
+      }
+      active.push(line);
+    }
+
+    // reviews on a 7-game-day cadence: persist, or exit after three straight
+    // losing periods (never the last line standing — a company doesn't
+    // dissolve itself, it limps until the market turns)
+    for (const line of [...active]) {
+      const st = stateBy.get(line.product);
+      if (!st || st.age < 4200) continue;
+      const pnl = await this.linePnl(companyEid, bizLot, line, active.length, Math.min(st.age, 8400));
+      const losses = pnl < 0 ? st.loss_reviews + 1 : 0;
+      if (losses >= 3 && active.length > 1) {
+        await pool.query(
+          "update company_lines set status = 'closed', loss_reviews = $4, last_review = now() where world_id = $1 and company_entity = $2 and product = $3",
+          [WORLD_ID, companyEid, line.product, losses]
+        );
+        // clearance: mark the remaining stock down and pull the working bids
+        await pool.query(
+          "update shelf_listings set price = greatest(0.05, round(price * 0.75, 2)) where world_id = $1 and lot_id = $2 and item = $3",
+          [WORLD_ID, bizLot, line.product]
+        );
+        const toPull = [line.product, ...line.chain.inputs.map((i) => i.item)];
+        const bids = await pool.query(
+          `select id from orders where world_id = $1 and owner_entity = $2 and side = 'buy'
+             and asset_type = 'item' and item = any($3::text[])`,
+          [WORLD_ID, companyEid, toPull]
+        );
+        for (const row of bids.rows) await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
+        console.log(`[companyOps] ${seed.name} exits ${line.product} (3 losing reviews) — clearance sale on`);
+        active.splice(active.indexOf(line), 1);
+      } else {
+        await pool.query(
+          "update company_lines set loss_reviews = $4, last_review = now() where world_id = $1 and company_entity = $2 and product = $3",
+          [WORLD_ID, companyEid, line.product, losses]
+        );
+      }
+    }
+
+    // a shelf per line, so the second product has somewhere to sell from
+    await this.ensureFurnitureCount(companyEid, bizLot, "shelf", Math.min(active.length, 6));
+
+    for (const line of active) {
+      let scale = 1;
+      if (line.chain.machines.length)
+        scale = await this.produce(companyEid, bizLot, seed, line).catch((e): number => {
+          console.error("[companyOps] produce", seed.name, line.product, e?.message ?? e);
+          return 1;
+        });
+      await this.retailLine(companyEid, bizLot, seed, line, scale, balance).catch(() => {});
+    }
+  }
+
+  // source stock on the exchange, haul it in, shelve it, price it — the
+  // retail half of one product line
+  private async retailLine(
+    companyEid: number,
+    bizLot: number,
+    seed: SeedDef,
+    line: ProductLine,
+    scale: number,
+    balance: number
+  ): Promise<void> {
+    const product = line.product;
     const shelf = await this.goods.inventory("shelf", String(bizLot));
     const store = await this.goods.inventory("lot", String(bizLot));
+    // a grocer that can't source its produce anywhere can grow its own —
+    // same integration choice the processors get for their inputs
+    if (!line.chain.ladder.length && ITEM_SOURCE[product] && (shelf[product] ?? 0) + (store[product] ?? 0) === 0)
+      await this.ensureSourceFor(companyEid, seed, product, bizLot).catch(() => {});
     const pocket = await this.goods.inventory("entity", String(companyEid));
     const base = BASE_PRICE[product] ?? 10;
     if ((pocket[product] ?? 0) > 0)
@@ -624,12 +912,25 @@ export class CompanyOps {
       await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
     const onHand = (shelf[product] ?? 0) + (store[product] ?? 0);
     if (onHand < 12 * scale && balance > 300 && !openBids.rowCount) {
-      const limit = Math.round(base * 1.3 * 100) / 100;
-      await this.market.place(companyEid, "buy", product, 10 * scale, limit).catch(() => {});
+      // wholesale only makes sense below what the shelf actually charges —
+      // the bid rides the market rate, capped at 80% of the standing price
+      const ref = await this.market.refPrice(product);
+      const listedPx = await pool.query(
+        "select price from shelf_listings where world_id = $1 and lot_id = $2 and item = $3 limit 1",
+        [WORLD_ID, bizLot, product]
+      );
+      const shelfPx = listedPx.rowCount ? Number(listedPx.rows[0].price) : retailPrice(Math.max(ref * 1.15, 0.1));
+      const limit = Math.round(Math.min(ref * 1.02, shelfPx * 0.8) * 100) / 100;
+      if (limit > 0.01)
+        await this.market.place(companyEid, "buy", product, 10 * scale, limit).catch(() => {});
     }
     const inStore = (await this.goods.inventory("lot", String(bizLot)))[product] ?? 0;
+    // a NEW listing opens at a margin over the market rate; after that the
+    // shelf price belongs to the manager's sell-through repricing, so the
+    // restock explicitly keeps whatever price stands
+    const openingPx = retailPrice(Math.max((await this.market.refPrice(product)) * 1.15, 0.1));
     await this.goods
-      .autoRetail(companyEid, bizLot, product, retailPrice(base * 1.3), Math.min(inStore, 10 * scale))
+      .autoRetail(companyEid, bizLot, product, openingPx, Math.min(inStore, 10 * scale), true)
       .catch(() => {});
   }
 
@@ -638,8 +939,8 @@ export class CompanyOps {
   // SCALE — how many of the final station the works runs — so retail keeps
   // pace with production. A company that keeps selling out while its benches
   // are saturated earns another bench, another rack, another pair of hands.
-  private async produce(companyEid: number, bizLot: number, seed: SeedDef): Promise<number> {
-    const chain = seed.chain!;
+  private async produce(companyEid: number, bizLot: number, seed: SeedDef, line: ProductLine): Promise<number> {
+    const chain = line.chain;
     const primary = chain.machines[chain.machines.length - 1];
     const furn = await this.interiors.items(bizLot);
     let scale = Math.max(1, furn.filter((f) => f.item === primary).length);
@@ -647,14 +948,22 @@ export class CompanyOps {
     const store = await this.goods.inventory("lot", String(bizLot));
     const shelf = await this.goods.inventory("shelf", String(bizLot));
     const balance = await this.balanceOf(companyEid);
+    // the queue this line answers for is its own recipes, so a busy beer
+    // bench doesn't stop the whiskey line from working
+    const ladderIds = chain.ladder.map(([r]) => r);
     const queued = Number(
-      (await pool.query("select count(*) as n from crafts where lot_id = $1", [bizLot])).rows[0].n
+      (
+        await pool.query("select count(*) as n from crafts where lot_id = $1 and recipe = any($2::text[])", [
+          bizLot,
+          ladderIds.length ? ladderIds : [""],
+        ])
+      ).rows[0].n
     );
 
     // demand outrunning capacity: the product is gone everywhere AND the
     // benches are already full. That's the signal to expand — not a timer,
     // not a balance check alone
-    const product = seed.product!;
+    const product = line.product;
     const soldOut = (store[product] ?? 0) + (shelf[product] ?? 0) === 0;
     if (soldOut && queued >= scale * 3 && scale < 4 && balance > 2000 && primary !== "rack_l")
       scale = await this.ensureFurnitureCount(companyEid, bizLot, primary, scale + 1);
@@ -669,30 +978,46 @@ export class CompanyOps {
     // and so does the staff: a crafter per extra bench keeps the machines
     // visibly worked, a stocker keeps the shelves fed from the racks
     if (primary !== "rack_l") {
-      await this.workforce.ensureStaffed(companyEid, bizLot, "stocker", 46).catch(() => {});
+      const wage = await this.workforce.marketWage();
+      await this.workforce.ensureStaffed(companyEid, bizLot, "stocker", wage).catch(() => {});
       if (scale > 1)
-        await this.workforce.ensureStaffed(companyEid, bizLot, "crafter", 48, scale - 1).catch(() => {});
+        await this.workforce.ensureStaffed(companyEid, bizLot, "crafter", wage + 2, scale - 1).catch(() => {});
     }
     // a lapsed licence stops a permitted line dead — renew from company funds
     if (seed.permit && !(await this.permits.has(companyEid, seed.permit)))
       await this.permits.issue(() => true, companyEid, seed.permit).catch(() => {});
 
     for (const inp of chain.inputs) {
+      // surplus from the company's own fields feeds the open market — the
+      // world's raw supply comes from whoever grows it, city not involved
+      const have = store[inp.item] ?? 0;
+      if (have > inp.min * scale * 4 && !(await this.hasOpenSell(companyEid, inp.item))) {
+        const excess = Math.floor(have - inp.min * scale * 2);
+        const ask = Math.round((await this.market.refPrice(inp.item)) * 0.98 * 100) / 100;
+        await this.goods.transfer(companyEid, bizLot, inp.item, excess, false).catch(() => {});
+        await this.market.place(companyEid, "sell", inp.item, excess, Math.max(0.01, ask)).catch(() => {});
+      }
       if ((store[inp.item] ?? 0) >= inp.min * scale) continue;
-      // a bid that has sat unfilled for two game days is priced wrong — pull
-      // it (through cancel, so the escrowed cash comes home) and re-bid at
-      // the going rate instead of queueing behind itself
-      // just above the city's supplier-of-last-resort price, so the line never
-      // starves — and any player selling cheaper gets lifted first
-      const limit = Math.round((BASE_PRICE[inp.item] ?? 8) * 2.05 * 100) / 100;
-      const stale = await pool.query(
-        `select id from orders where world_id = $1 and owner_entity = $2 and item = $3
-           and side = 'buy' and asset_type = 'item'
-           and (created_at < now() - interval '20 minutes' or price < $4)`,
-        [WORLD_ID, companyEid, inp.item, limit]
+      if ((store[inp.item] ?? 0) === 0)
+        await this.ensureSourceFor(companyEid, seed, inp.item, bizLot).catch(() => {});
+      const open = await pool.query(
+        `select id, price, created_at < now() - interval '20 minutes' as old
+           from orders where world_id = $1 and owner_entity = $2 and item = $3
+           and side = 'buy' and asset_type = 'item' order by created_at desc`,
+        [WORLD_ID, companyEid, inp.item]
       );
-      for (const row of stale.rows) await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
-      if (balance < 500 || (await this.hasOpenBuy(companyEid, inp.item))) continue;
+      const existing = open.rowCount ? Number(open.rows[0].price) : null;
+      const limit = await this.bidPrice(inp.item, (store[inp.item] ?? 0) === 0, existing);
+      // a bid that has sat unfilled or drifted from the going rate is pulled
+      // (through cancel, so the escrowed cash comes home) and re-quoted
+      let live = 0;
+      for (const row of open.rows) {
+        const px = Number(row.price);
+        if (row.old || Math.abs(px - limit) / limit > 0.08)
+          await this.market.cancel(companyEid, Number(row.id)).catch(() => {});
+        else live++;
+      }
+      if (balance < 500 || live > 0) continue;
       await this.market.place(companyEid, "buy", inp.item, inp.batch * scale, limit).catch((e) => console.error("[produce] bid", seed.name, inp.item, e?.message ?? e));
     }
     // exchange fills land in the pocket; the works run from the property
@@ -740,6 +1065,16 @@ export class CompanyOps {
         await this.stocks.trade(eid, s.company, side, qty, px).catch(() => {});
       }
     }
+  }
+
+  // already offering this item? one working ask at a time
+  private async hasOpenSell(eid: number, item: string): Promise<boolean> {
+    const r = await pool.query(
+      `select 1 from orders where world_id = $1 and owner_entity = $2 and item = $3
+         and side = 'sell' and asset_type = 'item' limit 1`,
+      [WORLD_ID, eid, item]
+    );
+    return !!r.rowCount;
   }
 
   // already bidding for this item? don't stack another order on top

@@ -22,6 +22,8 @@ import {
   shapesOverlap,
   validatePlan,
   TILE_WORLD_SIZE as TS,
+  BUILD_TEMPLATES,
+  templateFits,
 } from "@mc/shared";
 import { Engine } from "../render/engine.js";
 import { fmtMoney } from "../config.js";
@@ -32,6 +34,7 @@ const FLOOR_H = 2.6;
 
 interface Net {
   build(lotId: number, rects: PlanRect[], floors: number): void;
+  buildTemplate(lotId: number, template: string): void;
   setupSource(lotId: number, type: string, rects: PlanRect[]): void;
   buildDock(lotId: number, x: number, y: number): void;
   demolishArea(lotId: number, rect: { x: number; y: number; w: number; h: number }): void;
@@ -413,6 +416,15 @@ export class BuildMode {
         <button class="lp-close bm-exit">✕</button>
       </div>
       <div class="bm-kinds">${kinds}</div>
+      <div class="bm-crops bm-temps"><span class="bm-label">Type</span>
+        <button class="bm-crop bm-temp active" data-id="custom" title="Draw your own outline">${ic("design", 15)}<span>Custom</span></button>
+        ${BUILD_TEMPLATES.map((t) => {
+          const fits = this.lot ? templateFits(t, this.lot) : false;
+          return `<button class="bm-crop bm-temp" data-id="${t.id}" ${fits ? "" : "disabled"}
+            title="${fits ? `$${t.cost.toLocaleString()} · ${t.floors} floor${t.floors > 1 ? "s" : ""} · ${t.buildMinutes} min` : "This lot is too small"}">
+            ${ic(`kind_${t.kind}`, 15)}<span>${t.label}</span></button>`;
+        }).join("")}
+      </div>
       <div class="bm-crops" style="display:none"><span class="bm-label">Crop</span>${crops}</div>
       <div class="bm-digs" style="display:none"><span class="bm-label">Resource</span>${digs}</div>
       <div class="bm-row">
@@ -455,13 +467,22 @@ export class BuildMode {
           b.classList.add("bm-kind-locked");
         }
       });
-      this.bar.querySelectorAll<HTMLButtonElement>(".bm-crop").forEach((b) => {
+      this.bar.querySelectorAll<HTMLButtonElement>(".bm-crop[data-crop]").forEach((b) => {
         if (b.dataset.crop !== exSrc) {
           b.disabled = true;
           b.classList.add("bm-kind-locked");
         }
       });
     }
+    this.bar.querySelectorAll<HTMLButtonElement>(".bm-temp").forEach((b) =>
+      b.addEventListener("click", () => {
+        const id = b.dataset.id!;
+        this.bar?.querySelectorAll(".bm-temp").forEach((x) => x.classList.toggle("active", x === b));
+        if (id === "custom" || !this.lot) return;
+        this.net.buildTemplate(this.lot.id, id);
+        this.exit();
+      })
+    );
     this.bar.querySelector(".bm-exit")?.addEventListener("click", () => this.exit());
     this.bar.querySelector(".bm-wreck")?.addEventListener("click", () => {
       const on = this.kind !== "demolish";
@@ -487,8 +508,10 @@ export class BuildMode {
         if (confirmEl) confirmEl.style.display = "";
         const floorsEl = this.bar?.querySelector<HTMLElement>(".bm-floors");
         if (floorsEl) floorsEl.style.display = this.kind === "building" ? "" : "none";
-        const cropsEl = this.bar?.querySelector<HTMLElement>(".bm-crops");
+        const cropsEl = this.bar?.querySelector<HTMLElement>(".bm-crops:not(.bm-temps)");
         if (cropsEl) cropsEl.style.display = this.kind === "farm" ? "" : "none";
+        const tempsEl = this.bar?.querySelector<HTMLElement>(".bm-temps");
+        if (tempsEl) tempsEl.style.display = this.kind === "building" ? "" : "none";
         const digsEl = this.bar?.querySelector<HTMLElement>(".bm-digs");
         if (digsEl) digsEl.style.display = this.kind === "quarry" ? "" : "none";
         if (this.kind === "demolish") {

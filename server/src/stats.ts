@@ -7,7 +7,6 @@ import {
   gdpFromLedger,
   indexDivisor,
   realizedRange,
-  recipeById,
   sourceByType,
   sourceYield,
   vwap,
@@ -121,19 +120,11 @@ export class StatsService {
   }
 
   private async snapshotCommodities(bucket: number, windowSql: string): Promise<void> {
-    // produced: resolved crafts this game day + the daily yield of every
-    // active production site (both are real recorded operations)
+    // crafted production is recorded by resolveCrafts the moment it happens
+    // (the craft rows are deleted on resolution, so scanning them here missed
+    // nearly everything). The snapshot only ADDS the daily yield of active
+    // production sites and fills in consumption.
     const produced = new Map<string, number>();
-    const crafts = await pool.query(
-      `select recipe, sum(count) as n from crafts
-        where world_id = $1 and done_at > ${windowSql} and done_at <= now()
-        group by recipe`,
-      [WORLD_ID]
-    );
-    for (const r of crafts.rows) {
-      const rec = recipeById(r.recipe);
-      if (rec) produced.set(rec.out, (produced.get(rec.out) ?? 0) + rec.outQty * Number(r.n));
-    }
     for (const st of this.lots.all()) {
       if (!st.source) continue;
       const def = sourceByType(st.source.type);
@@ -157,7 +148,8 @@ export class StatsService {
       await pool.query(
         `insert into stat_commodity (world_id, bucket, item, produced, consumed)
          values ($1,$2,$3,$4,$5)
-         on conflict (world_id, bucket, item) do update set produced = $4, consumed = $5`,
+         on conflict (world_id, bucket, item) do update
+           set produced = stat_commodity.produced + $4, consumed = $5`,
         [WORLD_ID, bucket, item, produced.get(item) ?? 0, consumed.get(item) ?? 0]
       );
     }
@@ -195,13 +187,13 @@ export class StatsService {
       "select coalesce(sum(slots), 0) as open from hire_offers where world_id = $1",
       [WORLD_ID]
     );
-    let rentSum = 0;
-    let rented = 0;
-    for (const st of this.lots.all())
-      if (st.tenantId && st.rent > 0) {
-        rentSum += st.rent;
-        rented++;
-      }
+    // what people actually paid to live here this game day — the housing
+    // rents in the ledger, not the (mostly empty) commercial tenancy roll
+    const rentPaid = await pool.query(
+      `select avg(amount) as r from ledger
+        where category = 'rent' and currency = 'clean' and ts > ${windowSql}`
+    );
+    const avgRent = rentPaid.rows[0]?.r !== null ? Number(rentPaid.rows[0].r) : null;
     const coin = await this.crypto.networkStats();
     const e = emp.rows[0];
 
@@ -226,7 +218,7 @@ export class StatsService {
         Number(openJobs.rows[0].open),
         Number(e.pop),
         Number(e.pop) > 0 ? Number(e.housed) / Number(e.pop) : null,
-        rented > 0 ? rentSum / rented : null,
+        avgRent,
         coin.circulating,
         coin.dailyEmission,
         coin.worldHash,

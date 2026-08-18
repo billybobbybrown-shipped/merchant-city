@@ -34,6 +34,7 @@ interface Net {
   openShop(lotId: number, furnId: number): void;
   openRack(lotId: number, furnId: number): void;
   openDock(lotId: number): void;
+  canEdit(lotId: number): boolean;
   walk(x: number, z: number): void;
   elevate(y: number): void;
   closeFixtures(): void;
@@ -583,10 +584,10 @@ export class InteriorMode {
     if (this.mode === "interact") {
       this.bar.innerHTML = `
         <div class="fb-head">
-          <span>INTERIOR — click a machine to produce · click racks & shelves for storage · Esc leave</span>
+          <span>${this.lotId !== null && this.net.canEdit(this.lotId) ? "INTERIOR — click a machine to produce · click racks & shelves for storage · Esc leave" : "VISITING — browse the shelves · Esc leave"}</span>
           <span class="fb-actions">
             ${this.floorControl()}
-            <button class="btn-secondary fb-edit">${ic("edit", 14)} Edit layout</button>
+            ${this.lotId !== null && this.net.canEdit(this.lotId) ? `<button class="btn-secondary fb-edit">${ic("edit", 14)} Edit layout</button>` : ""}
             <button class="lp-close fb-exit">✕</button>
           </span>
         </div>`;

@@ -23,5 +23,5 @@ export const ZONE_BASE_VALUE: Record<Zone, number> = {
   mixed: 90,
   residential: 60,
   industrial: 40,
-  park: 0,
+  park: 3,
 };

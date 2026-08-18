@@ -9,7 +9,7 @@ export const BASE_PRICE: Record<string, number> = {
   bread: 6, corn: 3, carrots: 3, shirt: 25, phone: 260,
   wood: 5, stone: 5, iron_ore: 8, wheat: 3, cotton: 4, crude_oil: 10,
   planks: 8, bricks: 8, iron: 18, flour: 5, fabric: 7, fuel: 14,
-  tobacco: 4, cured_tobacco: 9, beer: 8, whiskey: 22,
+  tobacco: 4, cured_tobacco: 9, beer: 8, whiskey: 22, rug: 18, plant: 12, desk: 35, chair: 30,
   cigarettes: 10, cigars: 24,
   gun_barrel: 34, gun_action: 58, gun_stock: 22,
   hunting_rifle: 160, pistol: 110, shotgun: 130, ammo: 4,

@@ -1,5 +1,5 @@
 import { PoolClient } from "pg";
-import { itemById, POCKET_SLOTS, fitsPocket, stackLimit, permitFor } from "@mc/shared";
+import { itemById, POCKET_SLOTS, fitsPocket, stackLimit, permitFor, BASE_PRICE } from "@mc/shared";
 import { pool } from "./db.js";
 import { EconomyError } from "./errors.js";
 import { placeOrder, cancelOrder } from "./orderbook.js";
@@ -32,7 +32,7 @@ export class MarketStore {
   // ---- reads ----
 
   async summary(): Promise<
-    Array<{ item: string; last: number | null; bid: number | null; ask: number | null; dayVol: number }>
+    Array<{ item: string; last: number | null; bid: number | null; ask: number | null; dayVol: number; totalVol: number }>
   > {
     const last = await pool.query(
       `select distinct on (item) item, price from trades where world_id = $1 and asset_type = 'item' order by item, ts desc`,
@@ -48,9 +48,16 @@ export class MarketStore {
         where world_id = $1 and asset_type = 'item' and ts > now() - interval '10 minutes' group by item`,
       [WORLD_ID]
     );
-    const out = new Map<string, { item: string; last: number | null; bid: number | null; ask: number | null; dayVol: number }>();
+    // lifetime volume: "most traded" means what has actually traded the most,
+    // not what happened to print in the last ten minutes
+    const total = await pool.query(
+      `select item, coalesce(sum(qty), 0) as v from trades
+        where world_id = $1 and asset_type = 'item' group by item`,
+      [WORLD_ID]
+    );
+    const out = new Map<string, { item: string; last: number | null; bid: number | null; ask: number | null; dayVol: number; totalVol: number }>();
     const get = (item: string) => {
-      if (!out.has(item)) out.set(item, { item, last: null, bid: null, ask: null, dayVol: 0 });
+      if (!out.has(item)) out.set(item, { item, last: null, bid: null, ask: null, dayVol: 0, totalVol: 0 });
       return out.get(item)!;
     };
     for (const r of last.rows) get(r.item).last = Number(r.price);
@@ -59,6 +66,7 @@ export class MarketStore {
       else get(r.item).ask = Number(r.px);
     }
     for (const r of vol.rows) get(r.item).dayVol = Number(r.v);
+    for (const r of total.rows) get(r.item).totalVol = Number(r.v);
     return [...out.values()];
   }
 
@@ -130,6 +138,28 @@ export class MarketStore {
   // — a fixture they are placing, a component they are installing. It fills
   // against whatever is actually on offer and never rests; if nobody is
   // selling, it fails rather than conjuring the goods out of nothing.
+  // What the item is worth: what it has ACTUALLY traded at (volume-weighted
+  // over the last game week, else the last print). The catalog base price is
+  // nothing but the opening reference for a market that has never traded —
+  // after the first print it is never consulted again. Supply and demand own
+  // the price from there.
+  async refPrice(item: string): Promise<number> {
+    const vw = await pool.query(
+      `select sum(price * qty) / nullif(sum(qty), 0) as v from trades
+        where world_id = $1 and asset_type = 'item' and item = $2
+          and ts > now() - make_interval(mins => 70)`,
+      [WORLD_ID, item]
+    );
+    if (vw.rows[0]?.v != null) return Number(vw.rows[0].v);
+    const last = await pool.query(
+      `select price from trades where world_id = $1 and asset_type = 'item' and item = $2
+        order by ts desc limit 1`,
+      [WORLD_ID, item]
+    );
+    if (last.rowCount) return Number(last.rows[0].price);
+    return BASE_PRICE[item] ?? 10;
+  }
+
   async buyNow(
     eid: number,
     item: string,

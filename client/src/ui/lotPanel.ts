@@ -31,7 +31,7 @@ export interface LotPanelActions {
 
 const kindIcon = (kind: string | undefined) =>
   ic(
-    ["house", "shop", "office", "apartment", "tower", "skyscraper", "warehouse", "factory", "custom"].includes(kind ?? "")
+    ["house", "shop", "office", "apartment", "tower", "skyscraper", "warehouse", "factory", "gas_station", "custom"].includes(kind ?? "")
       ? `kind_${kind}`
       : "kind_custom",
     20
@@ -136,9 +136,13 @@ export class LotPanel {
           ${signToggle}
         </div>`;
     } else if (src && srcDef) {
+      // the working numbers — daily yield, stock waiting, reserves left —
+      // are the operator's business; a passer-by sees what the site IS
       buildingCard = `<div class="lp-bcard">
             <div class="lp-bname">${ic(srcDef.item, 20)} ${srcDef.label}</div>
-            <div class="lp-bar-label">Produces ${sourceYield(srcDef, src.area)} ${itemById(srcDef.item)?.label ?? srcDef.item} per day · <span class="lp-stock">checking stock…</span></div>
+            ${
+              mine || tenantMe
+                ? `<div class="lp-bar-label">Produces ${sourceYield(srcDef, src.area)} ${itemById(srcDef.item)?.label ?? srcDef.item} per day · <span class="lp-stock">checking stock…</span></div>
             ${
               src.reserve
                 ? (() => {
@@ -151,6 +155,8 @@ export class LotPanel {
                           : `<b class="mkt-down">Worked out — nothing left to dig</b>`
                       }</div>`;
                   })()
+                : ""
+            }`
                 : ""
             }
           </div>`;
@@ -172,7 +178,9 @@ export class LotPanel {
     }
     if (!mine && !tenantMe && state.forRent && !state.tenantId && !vacant)
       primary += `<button class="btn-primary lp-rent" ${cash >= state.rent ? "" : "disabled"}>Rent · ${fmtMoney(state.rent)}/day</button>`;
-    if ((mine || tenantMe) && !vacant && !underConstruction && !src)
+    // any finished building is enterable — walk into shops, look around.
+    // What you can TOUCH inside stays keyed to who operates the place.
+    if (!vacant && !underConstruction && !src)
       primary += `<button class="btn-primary lp-enter">Enter building</button>`;
 
     // ---------- owner sections ----------

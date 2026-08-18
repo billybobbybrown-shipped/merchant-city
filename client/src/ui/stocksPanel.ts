@@ -1,6 +1,7 @@
 import { SERVER_URL, fmtMoney, fmtCap } from "../config.js";
 import { drawCandles, fmtPrice, Candle, timeframeButtons, timeframeMs } from "./chart.js";
 import { tabStrip, wireTabs } from "./panelTabs.js";
+import { stockMeta, tapeTone } from "./marketMeta.js";
 
 interface StockRow {
   company: number;
@@ -17,7 +18,7 @@ interface StockRow {
 }
 
 interface StockActions {
-  trade(company: number, side: "buy" | "sell", qty: number): void;
+  trade(company: number, side: "buy" | "sell", qty: number, price?: number): void;
   cancel(orderId: number): void;
 }
 
@@ -49,15 +50,74 @@ export function estimateFill(
   return { total, avg: filled > 0 ? total / filled : null, available };
 }
 
+type Level = { price: number; qty: number };
+
+// The live depth book, exchange-style: buys down the left, sells down the
+// right, best prices meeting at the top, size bars scaled to the biggest
+// level on display. Fits without scrolling.
+export function bookLadder(bids: Level[], asks: Level[], depth = 7): string {
+  const b = bids.slice(0, depth);
+  const a = asks.slice(0, depth);
+  const maxQ = Math.max(1, ...b.map((l) => l.qty), ...a.map((l) => l.qty));
+  const row = (l: Level, side: "bid" | "ask") =>
+    `<div class="mkt-lvl mkt-${side}">
+       <div class="mkt-lvl-bar" style="width:${Math.max(3, Math.round((l.qty / maxQ) * 100))}%"></div>
+       <span>${fmtPrice(l.price)}</span><b>${l.qty.toLocaleString()}</b>
+     </div>`;
+  return `<div class="tt-book2">
+      <div class="tt-book-col">
+        <div class="tt-book-cap mkt-up">Buys</div>
+        ${b.map((l) => row(l, "bid")).join("") || `<div class="mkt-empty">none</div>`}
+      </div>
+      <div class="tt-book-col">
+        <div class="tt-book-cap mkt-down">Sells</div>
+        ${a.map((l) => row(l, "ask")).join("") || `<div class="mkt-empty">none</div>`}
+      </div>
+    </div>`;
+}
+
+// time & sales, coloured print-over-print like a real tape
+export function tapeHtml(trades: Array<{ price: number; qty: number; ts: number }>, n = 16): string {
+  return trades
+    .slice(0, n)
+    .map(
+      (t, i, arr) => `<div class="mkt-tape">
+        <span class="mkt-dim">${new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+        <span class="${tapeTone(t.price, arr[i + 1]?.price)}">${fmtPrice(t.price)}</span><b>${t.qty.toLocaleString()}</b>
+      </div>`
+    )
+    .join("");
+}
+
+// Stats over the chart's OWN timeframe: on the 5m chart, volume is the last
+// five minutes' dollar turnover and the gain/loss is the move over those five
+// minutes. Volume is dollars (price x quantity) — unit counts read as
+// "broken" the moment prices differ from $1.
+export function windowStats(oneMin: Candle[], windowMs: number): { vol: number; ref: number | null } {
+  const cut = Date.now() - windowMs;
+  let vol = 0;
+  let ref: number | null = null;
+  for (const c of oneMin) {
+    if (c.t < cut) {
+      ref = c.c; // the last close before the window opens = the baseline
+      continue;
+    }
+    if (c.v > 0) vol += c.v * c.c;
+  }
+  if (ref === null && oneMin.length && oneMin[0].t >= cut) ref = oneMin[0].o;
+  return { vol, ref };
+}
+
 // The stock market terminal: listed companies only (the coin has its own
-// page). Directory → per-company workstation with chart, depth, ticket and
-// fundamentals from the public books.
+// page). Directory → per-company workstation with chart, live depth, tape,
+// ticket and fundamentals from the public books.
 export class StocksPanel {
   private el: HTMLElement;
   private view: "list" | "detail" | "portfolio" = "list";
   private company: number | null = null;
   private res = "5m";
   private side: "buy" | "sell" = "buy";
+  private mode: "market" | "limit" = "market";
   private detailTab: "trade" | "about" = "trade";
 
   constructor(
@@ -129,7 +189,7 @@ export class StocksPanel {
       .sort((a, b) => b.value - a.value)
       .map(
         (r) => `<div class="mkt-row pf-row" data-c="${r.company}">
-            <span class="mkt-name">${r.name}<span class="mkt-sub">${r.shares.toLocaleString()} @ ${fmtPrice(r.avgCost)}</span></span>
+            <span class="mkt-name"><span class="mkt-symtag">${stockMeta(r.name).sym}</span>${r.name}<span class="mkt-sub">${r.shares.toLocaleString()} @ ${fmtPrice(r.avgCost)}</span></span>
             <b class="mkt-px">${fmtPrice(r.price)}</b>
             <span class="mkt-dim">${fmtMoney(r.value)}</span>
             ${pnl(r.unrealised)}
@@ -193,17 +253,18 @@ export class StocksPanel {
     for (const h of holdings) portValue += (lastBy.get(h.company) ?? 0)! * h.shares;
 
     let listHtml = "";
-    for (const s of rows) {
+    for (const s of [...rows].sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0))) {
       const held = heldBy.get(s.company) ?? 0;
+      const meta = stockMeta(s.name);
       listHtml += `<div class="mkt-row" data-c="${s.company}">
-          <span class="mkt-name">${s.name}
+          <span class="mkt-name"><span class="mkt-symtag">${meta.sym}</span>${s.name}
             ${s.halted ? `<span class="mkt-halt">HALT</span>` : ""}
             ${held > 0 ? `<span class="mkt-sub">${held.toLocaleString()} held</span>` : ""}</span>
           <b class="mkt-px">${s.last !== null ? fmtPrice(s.last) : "—"}</b>
           ${chgTag(chgPct(s.last, s.prevClose))}
           <span class="mkt-dim">${s.marketCap !== null ? fmtCap(s.marketCap) : ""}</span>
           <span class="mkt-dim">${
-            s.dps > 0 && s.last ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%` : s.dividendRatio > 0 ? `${(s.dividendRatio * 100).toFixed(1)}%` : ""
+            s.dps > 0 && s.last ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%` : s.dividendRatio > 0 ? `${(s.dividendRatio * 100).toFixed(1)}%` : "none"
           }</span>
         </div>`;
     }
@@ -260,52 +321,63 @@ export class StocksPanel {
   // ---------- workstation ----------
 
   private async renderDetail(company: number) {
-    const [rows, d, history, mine, fin] = await Promise.all([
+    const [rows, d, history, oneMin, mine, fin] = await Promise.all([
       fetch(`${SERVER_URL}/stocks`).then((r) => r.json()).catch(() => []) as Promise<StockRow[]>,
       fetch(`${SERVER_URL}/stocks/${company}`).then((r) => r.json()).catch(() => null),
       fetch(`${SERVER_URL}/market/candles?type=stock&key=s:${company}&res=${this.res}`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
+      fetch(`${SERVER_URL}/market/candles?type=stock&key=s:${company}&res=1m`).then((r) => r.json()).catch(() => []) as Promise<Candle[]>,
       fetch(`${SERVER_URL}/holdings/${this.selfEid}`).then((r) => r.json()).catch(() => ({ holdings: [], orders: [] })),
       fetch(`${SERVER_URL}/company/${company}/financials`).then((r) => r.json()).catch(() => null),
     ]);
     if (!this.visible || this.company !== company) return;
     const s = rows.find((x) => x.company === company);
     if (!s || !d) return;
+    const meta = stockMeta(s.name);
 
-    // trailing profit from the public books -> EPS -> P/E
+    // trailing OPERATING profit from the public books -> EPS -> P/E.
+    // Capital spending is an asset swap, not a loss; and these companies sit
+    // on big idle cash piles, so the BUSINESS is priced ex-cash — the
+    // standard cash-adjusted P/E.
+    // selling your own shares raises capital; it doesn't earn a cent
+    const NON_OPERATING = ["transfer", "ipo", "dividend", "shares", "land", "construction", "furniture", "demolition", "production_setup"];
     let pe = "—";
-    if (fin?.days?.length && s.last !== null) {
-      let profit = 0;
-      for (const day of fin.days.slice(0, 7)) {
+    let epsTxt = "—";
+    let revDay = 0;
+    let costDay = 0;
+    if (fin?.days?.length) {
+      const win = fin.days.slice(0, 7);
+      let inn = 0;
+      let out = 0;
+      for (const day of win) {
         for (const [k, v] of Object.entries(day.inflow as Record<string, number>))
-          if (!["transfer", "ipo", "dividend"].includes(k)) profit += v;
+          if (!NON_OPERATING.includes(k)) inn += v;
         for (const [k, v] of Object.entries(day.outflow as Record<string, number>))
-          if (!["transfer", "ipo", "dividend"].includes(k)) profit -= v;
+          if (!NON_OPERATING.includes(k)) out += v;
       }
-      const eps = ((profit / 7) * 365) / s.shares;
-      if (eps > 0) pe = (s.last / eps).toFixed(1);
+      revDay = inn / win.length;
+      costDay = out / win.length;
+      const eps = (((inn - out) / win.length) * 365) / s.shares;
+      if (eps !== 0) epsTxt = `$${Math.abs(eps) < 0.01 ? eps.toFixed(4) : eps.toFixed(2)}`;
+      if (eps > 0 && s.last !== null) {
+        const exCash = Math.max(0.01, s.last - (fin.cash ?? 0) / s.shares);
+        pe = (exCash / eps).toFixed(1);
+      }
     }
+    const landValue = (fin?.lots ?? []).reduce((a: number, l: { value: number }) => a + Number(l.value), 0);
+    const bookPerShare = fin ? ((fin.cash ?? 0) + landValue + (fin.inventoryValue ?? 0)) / s.shares : null;
 
     const held = (mine.holdings ?? []).find((h: { company: number }) => h.company === company)?.shares ?? 0;
     const myOrders = ((mine.orders ?? []) as Array<{ id: number; side: string; company: number; qty: number; price: number }>).filter(
       (o) => o.company === company
     );
-    const chg = chgPct(s.last, s.prevClose);
-    const divYield =
-      s.dps > 0
-        ? `${s.last ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%/yr · ` : ""}$${
-            s.dps < 0.01 ? s.dps.toFixed(4) : s.dps.toFixed(2)
-          }/sh weekly · pays in ${s.payInDays}d`
+    const day = windowStats(oneMin, timeframeMs(this.res));
+    const chg = chgPct(s.last, day.ref);
+    const yieldTxt =
+      s.dps > 0 && s.last
+        ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%`
         : s.dividendRatio > 0
-          ? `${(s.dividendRatio * 100).toFixed(1)}%/yr target — first payment pending`
-          : "none — growth company";
-
-    const tape = (d.trades as Array<{ price: number; qty: number; ts: number }>)
-      .slice(0, 12)
-      .map(
-        (t) => `<div class="mkt-tape"><span class="mkt-dim">${new Date(t.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          <span>${fmtPrice(t.price)}</span><b>${t.qty.toLocaleString()}</b></div>`
-      )
-      .join("");
+          ? `${(s.dividendRatio * 100).toFixed(1)}%*`
+          : "none";
 
     const mineHtml = myOrders.length
       ? myOrders
@@ -318,70 +390,85 @@ export class StocksPanel {
           .join("")
       : `<div class="mkt-empty">No open orders</div>`;
 
-    const stat = (label: string, value: string) =>
-      `<div class="mkt-stat"><span>${label}</span><b>${value}</b></div>`;
+    const stat = (label: string, value: string, tone = "") =>
+      `<div class="mkt-stat"><span>${label}</span><b class="${tone}">${value}</b></div>`;
 
     this.el.innerHTML = `
       <div class="ex-detail">
         <div class="mkt-header">
-          <button class="gd-btn mkt-back">‹ Listings</button>
-          <span class="mkt-title">${s.name}</span>
-          <b class="mkt-bigpx">${s.last !== null ? fmtPrice(s.last) : "—"}</b>
-          ${chgTag(chg)}
-          ${s.halted ? `<span class="mkt-halt">HALTED</span>` : ""}
+          <button class="gd-btn mkt-back">‹</button>
+          <span class="mkt-symbox">
+            <span class="mkt-symline"><span class="mkt-sym">${meta.sym}</span><span class="mkt-sector">${meta.sector}</span>${s.halted ? `<span class="mkt-halt">HALTED</span>` : ""}</span>
+            <span class="mkt-fullname">${s.name}</span>
+          </span>
           <span class="mkt-header-right">
             ${timeframeButtons(this.res)}
             <button class="lp-close mkt-close">✕</button>
           </span>
         </div>
         <div class="mkt-statbar">
-          ${stat("Market cap", s.marketCap !== null ? fmtCap(s.marketCap) : "—")}
-          ${stat("Shares", s.shares.toLocaleString())}
-          ${stat("Float", s.floatShares.toLocaleString())}
-          ${stat("Prev close", s.prevClose !== null ? fmtPrice(s.prevClose) : "—")}
-          ${stat("P/E", pe)}
-          ${stat("Dividend", s.dividendRatio > 0 ? `${(s.dividendRatio * 100).toFixed(1)}%` : "none")}
-          ${held > 0 ? stat("You hold", held.toLocaleString()) : ""}
+          <div class="mkt-stat mkt-stat-px"><span>Price</span>
+            <b class="${chg === null ? "" : chg >= 0 ? "mkt-up" : "mkt-down"}">${s.last !== null ? fmtPrice(s.last) : "—"}</b>
+            ${chgTag(chg)}
+          </div>
+          ${stat("Volume", day.vol > 0 ? fmtCap(Math.round(day.vol)) : "—")}
+          ${stat("Mkt cap", s.marketCap !== null ? fmtCap(s.marketCap) : "—")}
+          ${stat("Dividend", yieldTxt, s.dps > 0 ? "mkt-up" : "")}
+          ${held > 0 ? stat("Position", `${held.toLocaleString()} sh`, "mkt-gold") : ""}
         </div>
         <canvas class="ex-chart"></canvas>
         ${tabStrip([{ key: "trade", label: "Trade" }, { key: "about", label: "Company" }], this.detailTab)}
         <div class="mkt-cols" ${this.detailTab === "trade" ? "" : 'style="display:none"'}>
           <div class="mkt-col mkt-trade-col">
-            <div class="mkt-section">Trade</div>
             <div class="mkt-sides">
               <button class="mkt-side ${this.side === "buy" ? "mkt-side-buy" : ""}" data-side="buy">Buy</button>
               <button class="mkt-side ${this.side === "sell" ? "mkt-side-sell" : ""}" data-side="sell">Sell</button>
             </div>
+            <div class="mkt-modes">
+              <button class="gd-btn mkt-mode ${this.mode === "market" ? "active" : ""}" data-mode="market">Market</button>
+              <button class="gd-btn mkt-mode ${this.mode === "limit" ? "active" : ""}" data-mode="limit">Limit</button>
+            </div>
             <div class="mkt-ticket">
               <input class="lp-input mkt-qty" type="number" min="1" placeholder="shares" value="100" />
+              ${this.mode === "limit" ? `<input class="lp-input mkt-limitpx" type="number" min="0.01" step="0.01" placeholder="price" value="${((this.side === "buy" ? d.bids?.[0]?.price : d.asks?.[0]?.price) ?? s.last ?? 1).toFixed(2)}" />` : ""}
             </div>
             <div class="mkt-quote"></div>
             <button class="btn-primary mkt-place"></button>
-            <div class="mkt-note">Executes instantly at the market price.</div>
             ${myOrders.length ? `<div class="mkt-section">Your orders</div>${mineHtml}` : ""}
           </div>
           <div class="mkt-col">
-            <div class="mkt-section">Tape</div>
-            ${tape || `<div class="mkt-empty">No trades yet</div>`}
+            <div class="mkt-section">Order book</div>
+            <div class="tt-book">${bookLadder(d.bids ?? [], d.asks ?? [])}</div>
           </div>
         </div>
         <div class="mkt-cols" ${this.detailTab === "about" ? "" : 'style="display:none"'}>
           <div class="mkt-col">
-            <div class="mkt-section">The business</div>
+            <div class="mkt-section">${meta.sector} · what they do</div>
+            <div class="tt-desc">${meta.desc || "A listed company operating in the city."}</div>
+            <div class="mkt-section">Share structure</div>
             <div class="gd-row"><span>Shares outstanding</span><b>${s.shares.toLocaleString()}</b></div>
-            <div class="gd-row"><span>Float (tradable)</span><b>${s.floatShares.toLocaleString()}</b></div>
+            <div class="gd-row"><span>Float (tradable)</span><b>${s.floatShares.toLocaleString()} · ${((s.floatShares / s.shares) * 100).toFixed(0)}%</b></div>
             <div class="gd-row"><span>Insider held</span><b>${(s.shares - s.floatShares).toLocaleString()}</b></div>
-            <div class="gd-row"><span>Market cap</span><b>${s.marketCap !== null ? fmtCap(s.marketCap) : "—"}</b></div>
-            <div class="gd-row"><span>P/E (7d annualised)</span><b>${pe}</b></div>
-            <div class="mkt-note">Price follows the business: assets and trailing earnings set fair value, and the market trades around it.</div>
+            ${s.prevClose !== null ? `<div class="gd-row"><span>Daily band (±30%)</span><b>${fmtPrice(s.prevClose * 0.7)} – ${fmtPrice(s.prevClose * 1.3)}</b></div>` : ""}
           </div>
           <div class="mkt-col">
+            <div class="mkt-section">Fundamentals — from the public books</div>
+            <div class="gd-row"><span>P/E</span><b>${pe}</b></div>
+            <div class="gd-row"><span>EPS / year</span><b>${epsTxt}</b></div>
+            ${bookPerShare !== null ? `<div class="gd-row"><span>Book value / share</span><b>${fmtPrice(bookPerShare)}</b></div>` : ""}
+            <div class="gd-row"><span>Revenue / day</span><b>${fmtMoney(revDay)}</b></div>
+            <div class="gd-row"><span>Operating costs / day</span><b>${fmtMoney(costDay)}</b></div>
+            <div class="gd-row"><span>Operating profit / day</span><b class="${revDay - costDay >= 0 ? "mkt-up" : "mkt-down"}">${fmtMoney(revDay - costDay)}</b></div>
+            <div class="gd-row"><span>Cash</span><b>${fin ? fmtMoney(fin.cash ?? 0) : "—"}</b></div>
+            <div class="gd-row"><span>Assets</span><b>${fin ? fmtMoney(landValue + (fin.inventoryValue ?? 0)) : "—"}</b></div>
             <div class="mkt-section">Shareholder returns</div>
-            <div class="gd-row"><span>Dividend policy</span><b>${divYield}</b></div>
-            <div class="gd-row"><span>Previous close</span><b>${s.prevClose !== null ? fmtPrice(s.prevClose) : "—"}</b></div>
-            <div class="gd-row"><span>Your position</span><b>${held.toLocaleString()} shares</b></div>
-            ${s.prevClose !== null ? `<div class="gd-row"><span>Daily band</span><b>${fmtPrice(s.prevClose * 0.7)} – ${fmtPrice(s.prevClose * 1.3)}</b></div>` : ""}
-            <div class="mkt-note">Dividends are paid from real daily profit; growth companies pay none and reinvest instead.</div>
+            <div class="gd-row"><span>Dividend yield</span><b>${
+              s.dps > 0 && s.last
+                ? `${((s.dps * 52) / s.last * 100).toFixed(1)}%`
+                : s.dividendRatio > 0
+                  ? `${(s.dividendRatio * 100).toFixed(1)}%`
+                  : "none"
+            }</b></div>
           </div>
         </div>
       </div>`;
@@ -410,17 +497,34 @@ export class StocksPanel {
         void this.refresh();
       })
     );
+    this.el.querySelectorAll<HTMLElement>(".mkt-mode").forEach((b) =>
+      b.addEventListener("click", () => {
+        this.mode = b.dataset.mode as "market" | "limit";
+        void this.refresh();
+      })
+    );
     this.el.querySelectorAll<HTMLElement>(".mkt-cancel").forEach((b) =>
       b.addEventListener("click", () => this.actions.cancel(Number(b.dataset.id)))
     );
     const qtyEl = this.el.querySelector<HTMLInputElement>(".mkt-qty")!;
+    const pxEl = this.el.querySelector<HTMLInputElement>(".mkt-limitpx");
     const quoteEl = this.el.querySelector<HTMLElement>(".mkt-quote")!;
     const placeBtn = this.el.querySelector<HTMLButtonElement>(".mkt-place")!;
     const upd = () => {
       const q = Math.floor(Number(qtyEl.value));
+      placeBtn.textContent = `${this.side === "buy" ? "Buy" : "Sell"}${q > 0 ? ` ${q.toLocaleString()}` : ""} ${meta.sym}`;
+      if (this.mode === "limit") {
+        // your price, your order: it rests on the book until someone meets it
+        const p = Number(pxEl?.value);
+        quoteEl.innerHTML =
+          q > 0 && p > 0
+            ? `<span>Total</span><b>${fmtPrice(q * p)}</b><span class="mkt-warn">rests on the book at your price — cancel any time under Your orders</span>`
+            : `<span class="mkt-empty">Set quantity and price</span>`;
+        placeBtn.disabled = !(q > 0 && p > 0);
+        return;
+      }
       const levels = this.side === "buy" ? d.asks : d.bids;
       const est = estimateFill(levels, Math.max(0, q));
-      placeBtn.textContent = `${this.side === "buy" ? "Buy" : "Sell"}${q > 0 ? ` ${q.toLocaleString()}` : ""} shares`;
       if (q <= 0 || !levels.length) {
         quoteEl.innerHTML = levels.length
           ? `<span>Price</span><b>${fmtPrice(levels[0].price)}</b>`
@@ -428,16 +532,21 @@ export class StocksPanel {
         placeBtn.disabled = !levels.length;
         return;
       }
-      quoteEl.innerHTML = `<span>Price</span><b>${est.avg !== null ? fmtPrice(est.avg) : "—"}</b>
+      quoteEl.innerHTML = `<span>Avg price</span><b>${est.avg !== null ? fmtPrice(est.avg) : "—"}</b>
         <span>Total</span><b>${fmtPrice(est.total)}</b>
         ${q > est.available ? `<span class="mkt-warn">only ${est.available.toLocaleString()} available</span>` : ""}`;
       placeBtn.disabled = Math.min(q, est.available) <= 0;
     };
     qtyEl.addEventListener("input", upd);
+    pxEl?.addEventListener("input", upd);
     upd();
     placeBtn.addEventListener("click", () => {
       const q = Math.floor(Number(qtyEl.value));
-      if (q > 0) this.actions.trade(company, this.side, q);
+      if (q <= 0) return;
+      if (this.mode === "limit") {
+        const p = Number(pxEl?.value);
+        if (p > 0) this.actions.trade(company, this.side, q, Math.round(p * 100) / 100);
+      } else this.actions.trade(company, this.side, q);
     });
   }
 }

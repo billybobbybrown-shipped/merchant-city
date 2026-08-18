@@ -627,6 +627,222 @@ export function makeBuilding(def: BuildingDef, fw: number, fd: number): THREE.Gr
       addSign(g, def, w, d, h, def.floors);
       break;
     }
+    case "gas_station": {
+      // a real forecourt station: low flat-roofed store at the back with a
+      // bright fascia band, a tall canopy over the pump island out front,
+      // pump cabinets underneath, and a price totem at the street edge
+      const w = layout.w;
+      const d = layout.d;
+      const h = FLOOR_H; // the same storey height as every other building
+      const store = new THREE.Group();
+      store.add(box(w, h, d, def, 0, { door: true }));
+      // fascia band wrapping the storefront
+      const fasciaCol = pick(rng, [0xc0392b, 0x1f6f8b, 0x1f8b4c, 0xb9770e]);
+      const fascia = new THREE.Mesh(
+        new THREE.BoxGeometry(w + 0.12, 0.5, d + 0.12),
+        new THREE.MeshStandardMaterial({ color: fasciaCol, roughness: 0.6 })
+      );
+      fascia.position.set(0, h - 0.3, 0);
+      store.add(fascia);
+      // a real flat roof: overhanging cap slab, parapet rim, and the vents
+      // and units every one-storey commercial roof carries
+      const capMat = new THREE.MeshStandardMaterial({ color: 0x43494e, roughness: 0.9 });
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(w + 0.34, 0.14, d + 0.34), capMat);
+      cap.position.set(0, h + 0.02, 0);
+      cap.castShadow = true;
+      store.add(cap);
+      addParapet(store, w + 0.2, d + 0.2, h + 0.09, trim, []);
+      addRoofClutter(store, w, d, h + 0.09, rng);
+      // the name prints ON the fascia band, floated clear of its face so the
+      // two never z-fight when the camera crosses the interior boundary
+      if (def.sign !== false) {
+        const stex = signTexture(def.name, def.seed);
+        const smat = new THREE.MeshStandardMaterial({
+          map: stex,
+          emissiveMap: stex,
+          emissive: 0xffffff,
+          emissiveIntensity: 0,
+          roughness: 0.6,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+        });
+        registerNight(smat, 0.9);
+        const sw = Math.min(w * 0.7, 6);
+        const sign = new THREE.Mesh(new THREE.PlaneGeometry(sw, 0.5), smat);
+        sign.position.set(0, h - 0.2, (d + 0.12) / 2 + 0.05);
+        store.add(sign);
+      }
+      store.position.z = layout.centerZ;
+      g.add(store);
+
+      // forecourt geometry: the pump island lives out by the STREET, with
+      // real clearance from the storefront — cars pull between the two
+      const frontZ = layout.centerZ + d / 2;
+      const streetZ = fd / 2;
+      const canW = Math.min(w * 1.05, fw * 0.8);
+      const canD = Math.min(4.5, Math.max(2.6, (streetZ - frontZ) * 0.45));
+      let midZ = frontZ + (streetZ - frontZ) * 0.56;
+      midZ = Math.max(midZ, frontZ + canD / 2 + 1.15); // clear driveway, not a gulf
+      midZ = Math.min(midZ, streetZ - canD / 2 - 0.4); // never spill onto the walk
+      const canH = 3.4;
+      // matte, slightly warm grey-white — a painted steel deck, not a mirror
+      const canopyMat = new THREE.MeshStandardMaterial({ color: 0xcfcec8, roughness: 0.92, metalness: 0 });
+      const canopy = new THREE.Mesh(new THREE.BoxGeometry(canW, 0.35, canD), canopyMat);
+      canopy.position.set(0, canH, midZ);
+      canopy.castShadow = true;
+      g.add(canopy);
+      // the lit underside every real forecourt has after dark
+      const glowMat = new THREE.MeshStandardMaterial({
+        color: 0xb9b7ae,
+        emissive: 0xfff3d0,
+        emissiveIntensity: 0,
+        roughness: 0.95,
+      });
+      registerNight(glowMat, 0.85);
+      const glow = new THREE.Mesh(new THREE.PlaneGeometry(canW - 0.3, canD - 0.3), glowMat);
+      glow.rotation.x = Math.PI / 2;
+      glow.position.set(0, canH - 0.19, midZ);
+      g.add(glow);
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(canW + 0.08, 0.22, canD + 0.08),
+        new THREE.MeshStandardMaterial({ color: fasciaCol, roughness: 0.6 })
+      );
+      stripe.position.set(0, canH - 0.26, midZ);
+      g.add(stripe);
+      const colMat = new THREE.MeshStandardMaterial({ color: 0xb9bcbf, roughness: 0.5 });
+      for (const sx of [-canW / 2 + 0.7, canW / 2 - 0.7]) {
+        const col = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, canH, 8), colMat);
+        col.position.set(sx, canH / 2, midZ);
+        g.add(col);
+      }
+      // pump island: raised kerb + pump cabinets
+      const pumps = Math.max(2, Math.min(4, Math.floor(canW / 3.4)));
+      const kerb = new THREE.Mesh(
+        new THREE.BoxGeometry(canW * 0.8, 0.14, 1.1),
+        new THREE.MeshStandardMaterial({ color: 0x9aa0a4, roughness: 0.9 })
+      );
+      kerb.position.set(0, 0.07, midZ);
+      g.add(kerb);
+      const pumpMat = new THREE.MeshStandardMaterial({ color: 0xdcdcd6, roughness: 0.5 });
+      const pumpBandMat = new THREE.MeshStandardMaterial({ color: fasciaCol, roughness: 0.5 });
+      const pumpDarkMat = new THREE.MeshStandardMaterial({ color: 0x23282c, roughness: 0.6 });
+      const screenMat = new THREE.MeshStandardMaterial({
+        color: 0x0d1418, emissive: 0x9fd8c0, emissiveIntensity: 0, roughness: 0.4,
+      });
+      registerNight(screenMat, 0.7);
+      const hoseMat = new THREE.MeshStandardMaterial({ color: 0x181a1c, roughness: 0.9 });
+      for (let i = 0; i < pumps; i++) {
+        const px = -((pumps - 1) / 2) * 2.6 + i * 2.6;
+        // body on a dark plinth
+        const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.1, 0.5), pumpDarkMat);
+        plinth.position.set(px, 0.19, midZ);
+        g.add(plinth);
+        const pump = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.15, 0.42), pumpMat);
+        pump.position.set(px, 0.24 + 0.575, midZ);
+        pump.castShadow = true;
+        g.add(pump);
+        const band = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.24, 0.45), pumpBandMat);
+        band.position.set(px, 1.12, midZ);
+        g.add(band);
+        // both service faces: a pale display screen and a nozzle in its holster
+        for (const sideZ of [1, -1]) {
+          const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.2), screenMat);
+          screen.position.set(px - 0.09, 0.92, midZ + sideZ * 0.215);
+          if (sideZ < 0) screen.rotation.y = Math.PI;
+          g.add(screen);
+          const holster = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.3, 0.06), pumpDarkMat);
+          holster.position.set(px + 0.16, 0.72, midZ + sideZ * 0.24);
+          g.add(holster);
+          const nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.2, 6), pumpDarkMat);
+          nozzle.rotation.z = 0.5;
+          nozzle.position.set(px + 0.16, 0.9, midZ + sideZ * 0.25);
+          g.add(nozzle);
+          // hose: a tube that genuinely runs from the pump's outlet, sags,
+          // and meets the nozzle grip — both ends attached
+          const zFace = midZ + sideZ * 0.24;
+          const hoseCurve = new THREE.QuadraticBezierCurve3(
+            new THREE.Vector3(px - 0.18, 1.22, zFace),
+            new THREE.Vector3(px - 0.05, 0.62, zFace + sideZ * 0.1),
+            new THREE.Vector3(px + 0.15, 0.84, midZ + sideZ * 0.25)
+          );
+          const hose = new THREE.Mesh(new THREE.TubeGeometry(hoseCurve, 10, 0.022, 5), hoseMat);
+          g.add(hose);
+          // the outlet fitting the hose hangs from
+          const outlet = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.1, 6), pumpDarkMat);
+          outlet.position.set(px - 0.18, 1.24, zFace);
+          g.add(outlet);
+        }
+      }
+      // price totem by the street corner: a pole that ENDS under a solid
+      // double-faced sign box — brand board + price rows, edges in the
+      // station colour, lit at night. No floating planes, no pole poking out.
+      const poleX = fw / 2 - 1.1;
+      const boardW = 1.7;
+      const boardH = boardW * (160 / 128);
+      const totemTop = 6.2;
+      const poleH = totemTop - boardH;
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, poleH, 8), colMat);
+      pole.position.set(poleX, poleH / 2, streetZ - 0.8);
+      pole.castShadow = true;
+      g.add(pole);
+      const cv = document.createElement("canvas");
+      cv.width = 128;
+      cv.height = 160;
+      const cx = cv.getContext("2d")!;
+      const hex = `#${fasciaCol.toString(16).padStart(6, "0")}`;
+      cx.fillStyle = hex;
+      cx.fillRect(0, 0, 128, 44);
+      cx.fillStyle = "#ffffff";
+      cx.font = "bold 20px system-ui";
+      cx.textAlign = "center";
+      cx.fillText((def.name.split(" ")[0] ?? "FUEL").toUpperCase().slice(0, 8), 64, 30);
+      cx.fillStyle = "#101418";
+      cx.fillRect(0, 44, 128, 116);
+      const pr = mulberry32(hashSeed(def.seed, 0x9a5));
+      const rows: Array<[string, string]> = [
+        ["REG", (2.2 + pr() * 0.8).toFixed(2)],
+        ["PLUS", (2.7 + pr() * 0.8).toFixed(2)],
+        ["DSL", (2.5 + pr() * 0.9).toFixed(2)],
+      ];
+      rows.forEach(([label, price], i) => {
+        const y = 44 + 30 + i * 36;
+        cx.fillStyle = "#9aa4ad";
+        cx.font = "bold 15px system-ui";
+        cx.textAlign = "left";
+        cx.fillText(label, 10, y);
+        cx.fillStyle = "#ffd34d";
+        cx.font = "bold 22px system-ui";
+        cx.textAlign = "right";
+        cx.fillText(price, 118, y);
+      });
+      const totemTex = new THREE.CanvasTexture(cv);
+      totemTex.colorSpace = THREE.SRGBColorSpace;
+      const faceMat = new THREE.MeshStandardMaterial({
+        map: totemTex,
+        emissiveMap: totemTex,
+        emissive: 0xffffff,
+        emissiveIntensity: 0,
+        roughness: 0.55,
+      });
+      registerNight(faceMat, 0.8);
+      // a solid colour box, with the print applied as a facing plane on EACH
+      // side — a rotated plane reads the same texture correctly, so both
+      // faces display right-way-round with no mirroring tricks
+      const edgeMat = new THREE.MeshStandardMaterial({ color: fasciaCol, roughness: 0.6 });
+      const boardY = poleH + boardH / 2;
+      const boardZ = streetZ - 0.8;
+      const board = new THREE.Mesh(new THREE.BoxGeometry(boardW, boardH, 0.28), edgeMat);
+      board.position.set(poleX, boardY, boardZ);
+      board.castShadow = true;
+      g.add(board);
+      for (const back of [false, true]) {
+        const face = new THREE.Mesh(new THREE.PlaneGeometry(boardW - 0.06, boardH - 0.06), faceMat);
+        face.position.set(poleX, boardY, boardZ + (back ? -0.151 : 0.151));
+        if (back) face.rotation.y = Math.PI;
+        g.add(face);
+      }
+      break;
+    }
     case "warehouse": {
       const w = layout.w;
       const d = layout.d;

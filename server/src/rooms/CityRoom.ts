@@ -677,6 +677,17 @@ export class CityRoom extends Room<CityState> {
       })
     );
     this.onMessage(
+      "buildTemplate",
+      this.economy(async (client, data, eid) => {
+        const lotId = Number(data?.lotId);
+        const template = String(data?.template ?? "");
+        if (!Number.isInteger(lotId) || !template) throw new EconomyError("bad request");
+        const { lot, cash } = await this.lotStore.buildTemplate(eid, lotId, template);
+        this.applyCash(cash);
+        this.broadcast("lot", lot);
+      })
+    );
+    this.onMessage(
       "build",
       this.economy(async (client, data, eid) => {
         const lotId = Number(data?.lotId);

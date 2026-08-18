@@ -1557,6 +1557,18 @@ const DRAWERS: Record<string, Draw> = {
     rr(c, 15.4, 4, 3, 7, 0.8);
     fillOut(c, "#8c5844");
   },
+  kind_gas_station: (c) => {
+    // canopy on posts with a pump underneath
+    rr(c, 4, 5, 16, 3, 0.8);
+    fillOut(c, "#c0392b");
+    c.fillStyle = "#8d9aa6";
+    c.fillRect(6, 8, 1.4, 10);
+    c.fillRect(16.6, 8, 1.4, 10);
+    rr(c, 10, 11, 4.4, 7.5, 0.6);
+    fillOut(c, "#dcdcd6");
+    c.fillStyle = "#c0392b";
+    c.fillRect(10.3, 12.4, 3.8, 1.6);
+  },
   kind_custom: (c) => {
     rr(c, 4.5, 4.5, 15, 15, 1.2);
     c.setLineDash([2.6, 2]);

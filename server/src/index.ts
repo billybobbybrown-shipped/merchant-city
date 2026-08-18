@@ -95,6 +95,7 @@ async function main() {
   await crypto.seedGenesis();
   const ticker = new EconomyTicker(lotStore, goods, npcSim, world.map);
   ticker.stocks = stocks;
+  companyOps.logistics = logistics;
   ticker.companyOps = companyOps;
   ticker.crypto = crypto;
   ticker.stats = stats;

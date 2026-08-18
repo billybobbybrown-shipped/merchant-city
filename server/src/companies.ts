@@ -168,22 +168,28 @@ export class CompaniesStore {
     lots: Array<{ id: number; value: number }>;
     inventoryValue: number;
   }> {
+    // buckets are GAME days (10 real minutes), labelled by their wall-clock
+    // start — a calendar-day bucket is 144 game days and made every "per day"
+    // figure read 144x too large. Dollars only: coin-denominated rows are a
+    // different currency, not revenue.
     const led = await pool.query(
-      `select to_char(date_trunc('day', l.ts), 'YYYY-MM-DD') as day,
-              coalesce(l.category, 'other') as category,
+      `select floor(extract(epoch from l.ts) / 600) as bucket,
+              to_char(to_timestamp(floor(extract(epoch from l.ts) / 600) * 600), 'HH24:MI') as day,
+              case when l.reason like 'trade % s:%' then 'shares'
+                   else coalesce(l.category, 'other') end as category,
               sum(case when a_to.entity_id = $1 then l.amount else 0 end) as inflow,
               sum(case when a_from.entity_id = $1 then l.amount else 0 end) as outflow
          from ledger l
          left join accounts a_to on a_to.id = l.to_account
          left join accounts a_from on a_from.id = l.from_account
-        where a_to.entity_id = $1 or a_from.entity_id = $1
-        group by 1, 2 order by 1 desc limit 200`,
+        where (a_to.entity_id = $1 or a_from.entity_id = $1) and l.currency = 'clean'
+        group by 1, 2, 3 order by 1 desc limit 400`,
       [companyEid]
     );
-    const byDay = new Map<string, { inflow: Record<string, number>; outflow: Record<string, number> }>();
+    const byDay = new Map<string, { label: string; inflow: Record<string, number>; outflow: Record<string, number> }>();
     for (const row of led.rows) {
-      if (!byDay.has(row.day)) byDay.set(row.day, { inflow: {}, outflow: {} });
-      const d = byDay.get(row.day)!;
+      if (!byDay.has(row.bucket)) byDay.set(row.bucket, { label: row.day, inflow: {}, outflow: {} });
+      const d = byDay.get(row.bucket)!;
       if (Number(row.inflow) > 0) d.inflow[row.category] = Number(row.inflow);
       if (Number(row.outflow) > 0) d.outflow[row.category] = Number(row.outflow);
     }
@@ -199,7 +205,7 @@ export class CompaniesStore {
     let inventoryValue = 0;
     for (const row of inv.rows) inventoryValue += Number(row.qty) * (BASE_PRICE[row.item] ?? 0);
     return {
-      days: [...byDay.entries()].map(([day, v]) => ({ day, ...v })),
+      days: [...byDay.values()].map((v) => ({ day: v.label, inflow: v.inflow, outflow: v.outflow })),
       cash: bal.rowCount ? Number(bal.rows[0].b) : 0,
       lots: lotRows.rows.map((r) => ({ id: r.id, value: Number(r.value) })),
       inventoryValue: Math.round(inventoryValue * 100) / 100,
