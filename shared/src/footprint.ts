@@ -47,10 +47,10 @@ export function buildingLayout(def: BuildingDef, fw: number, fd: number): Buildi
       // the STORE is the structure — a low box across the back of the plot;
       // the front half is open forecourt where the client draws the canopy
       // and pumps. Interiors derive from this, so you walk the store only.
-      const d = Math.min(fd * rrange(rng, 0.26, 0.34), 7);
-      // width tied to depth so the store reads as a compact kiosk, never a
-      // stretched slab across the whole plot
-      const w = Math.min(fw * rrange(rng, 0.5, 0.65), d * 2.1, 12);
+      const d = Math.min(Math.max(fd * rrange(rng, 0.26, 0.34), 4.4), 7);
+      // the original store footprint widened by exactly two tiles (one per
+      // side) — bigger, but never swallowing the plot
+      const w = Math.min(Math.min(fw * rrange(rng, 0.5, 0.65), d * 2.1, 12) + 4, fw - 1.6);
       return { w, d, centerZ: -(fd / 2 - d / 2 - 0.4) };
     }
     case "house":

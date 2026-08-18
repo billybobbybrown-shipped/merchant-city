@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { CityMap, TILE_WORLD_SIZE as TS, hashSeed, mulberry32 } from "@mc/shared";
+import { BuildingDef, buildingLayout, CityMap, LotDef, TILE_WORLD_SIZE as TS, hashSeed, mulberry32 } from "@mc/shared";
 import { Engine } from "../render/engine.js";
 import { makeVehicle, VEHICLE_TYPES } from "../assets/vehicles.js";
 
@@ -41,6 +41,16 @@ interface Car {
   planTurn: boolean;
   // mid-turn state: a bezier arc from the stop line, around the corner, onto
   // the new street's lane — driven, not teleported
+  // pulled into a gas station: drive in, sit at the pump, drive out
+  visit: {
+    station: Station;
+    slot: PumpSlot;
+    phase: "pump" | null;
+    until: number;
+    entry: number;
+    resume: { dir: 1 | -1; lane: number };
+  } | null;
+  visitCooldown: number;
   turning: {
     p0: { x: number; z: number };
     p1: { x: number; z: number };
@@ -57,6 +67,21 @@ interface Car {
   yaw: number;
   group: THREE.Group;
   length: number;
+}
+
+const FACING_ROT = [0, Math.PI, Math.PI / 2, -Math.PI / 2];
+
+interface PumpSlot {
+  x: number;
+  z: number;
+  yaw: number;
+  busy: boolean;
+}
+interface Station {
+  lotId: number;
+  slots: PumpSlot[];
+  seg: Seg;
+  entryT: number; // where the forecourt meets this street, along its axis
 }
 
 const STOP_MS = 650;
@@ -130,7 +155,9 @@ export class Traffic {
 
     // ---- the fleet ----
     const rng = mulberry32(hashSeed(map.seed, 0xd21f));
-    const count = Math.min(36, Math.max(12, Math.floor(this.segs.length * 1.4)));
+    // enough traffic that streets read alive: roughly one car per drivable
+    // segment and a quarter, capped where draw calls start to matter
+    const count = Math.min(120, Math.max(24, Math.floor(this.segs.length * 1.7)));
     for (let i = 0; i < count; i++) {
       const seg = this.segs[Math.floor(rng() * this.segs.length)];
       const type = VEHICLE_TYPES[Math.floor(rng() * VEHICLE_TYPES.length)];
@@ -148,6 +175,8 @@ export class Traffic {
         waitingSince: 0,
         planAt: null,
         planTurn: false,
+        visit: null,
+        visitCooldown: 0,
         turning: null,
         clearedUntil: 0, // set to the spawn point below
         yaw: 0,
@@ -188,8 +217,11 @@ export class Traffic {
     return null;
   }
 
-  // is any other car inside this junction's box right now?
+  // is any other car inside this junction's box right now — or holding a
+  // reservation to cross it?
   private junctionBusy(c: Car, cross: Crossing): boolean {
+    const until = this.reserved.get(this.junctionKey(c.seg, cross));
+    if (until !== undefined && until > Date.now()) return true;
     const jx = c.seg.vertical ? centreLine(c.seg) : cross.at;
     const jz = c.seg.vertical ? cross.at : centreLine(c.seg);
     const r = Math.max(c.seg.w, cross.other.w) * TS * 0.5 + 1.5;
@@ -199,6 +231,65 @@ export class Traffic {
       if (Math.abs(p.x - jx) < r && Math.abs(p.z - jz) < r) return true;
     }
     return false;
+  }
+
+  private stations: Station[] = [];
+  // box reservations: when a car COMMITS to crossing a junction it holds the
+  // box for its crossing time, so two cars can't both pull out in the same
+  // instant and meet in the middle
+  private reserved = new Map<string, number>();
+
+  private junctionKey(seg: Seg, cross: Crossing): string {
+    return seg.vertical ? `${seg.fixed}:${cross.other.fixed}` : `${cross.other.fixed}:${seg.fixed}`;
+  }
+
+  // Pump slots derive from the same shared layout maths the station mesh
+  // uses, so cars stop exactly beside the rendered pumps. Called on load and
+  // whenever lots change (someone builds or demolishes a station).
+  setStations(list: Array<{ lot: LotDef; def: BuildingDef }>) {
+    // free any car mid-visit at a station that no longer exists
+    this.stations = [];
+    for (const { lot, def } of list) {
+      const sideways = lot.facing >= 2;
+      const fw = (sideways ? lot.h : lot.w) * TS;
+      const fd = (sideways ? lot.w : lot.h) * TS;
+      const layout = buildingLayout(def, fw, fd);
+      const frontZ = layout.centerZ + layout.d / 2;
+      const streetZ = fd / 2;
+      const pumps = fw >= 20 ? 4 : 3; // a fourth pump takes a genuinely wide plot
+      const pumpGap = 3.4;
+      const spread = pumpGap * (pumps - 1);
+      const canD = Math.min(4.6, Math.max(3.4, (streetZ - frontZ) * 0.5));
+      let midZ = frontZ + (streetZ - frontZ) * 0.56;
+      midZ = Math.max(midZ, frontZ + canD / 2 + 1.15);
+      midZ = Math.min(midZ, streetZ - canD / 2 - 0.4);
+      const yawRot = FACING_ROT[lot.facing] ?? 0;
+      const cx = (lot.x + lot.w / 2) * TS;
+      const cz = (lot.y + lot.h / 2) * TS;
+      const toWorld = (lx: number, lz: number) => ({
+        x: cx + lx * Math.cos(yawRot) + lz * Math.sin(yawRot),
+        z: cz - lx * Math.sin(yawRot) + lz * Math.cos(yawRot),
+      });
+      const slots: PumpSlot[] = [];
+      for (let i = 0; i < pumps; i++) {
+        const px = -((pumps - 1) / 2) * pumpGap + i * pumpGap;
+        for (const side of [1, -1]) {
+          const w = toWorld(px, midZ + side * 1.25);
+          slots.push({ x: w.x, z: w.z, yaw: yawRot + (side === 1 ? Math.PI / 2 : -Math.PI / 2), busy: false });
+        }
+      }
+      // which street serves the forecourt: nearest segment fronting the lot
+      const centre = toWorld(0, midZ);
+      let best: { seg: Seg; entryT: number; d: number } | null = null;
+      for (const seg of this.segs) {
+        const lat = Math.abs((seg.vertical ? centre.x : centre.z) - centreLine(seg));
+        const along = seg.vertical ? centre.z : centre.x;
+        if (along < seg.lo + 6 || along > seg.hi - 6) continue;
+        if (lat > 14) continue;
+        if (!best || lat < best.d) best = { seg, entryT: along, d: lat };
+      }
+      if (best) this.stations.push({ lotId: lot.id, slots, seg: best.seg, entryT: best.entryT });
+    }
   }
 
   // through traffic bearing down on a junction: anything on the given road
@@ -225,6 +316,34 @@ export class Traffic {
   update(dt: number) {
     const now = Date.now();
     for (const c of this.cars) {
+      // ---- at the pump: sit a while, then drive out ----
+      if (c.visit && c.visit.phase === "pump" && !c.turning) {
+        if (now < c.visit.until) {
+          c.speed = 0;
+          // settle the nose to the slot's parking angle
+          let d0 = c.visit.slot.yaw - c.yaw;
+          while (d0 > Math.PI) d0 -= Math.PI * 2;
+          while (d0 < -Math.PI) d0 += Math.PI * 2;
+          c.yaw += d0 * Math.min(1, dt * 5);
+          c.group.rotation.y = c.yaw;
+          continue;
+        }
+        // pull back out onto the street we came from, same direction
+        const v = c.visit;
+        const seg = v.station.seg;
+        const exitT = v.entry ?? v.station.entryT;
+        const outT = exitT + v.resume.dir * 7;
+        const laneLine = centreLine(seg) + laneOffset(seg, v.resume.dir, v.resume.lane);
+        const p0 = { x: c.group.position.x, z: c.group.position.z };
+        const p2 = seg.vertical ? { x: laneLine, z: outT } : { x: outT, z: laneLine };
+        const p1 = seg.vertical ? { x: laneLine, z: p0.z } : { x: p0.x, z: laneLine };
+        const len = Math.hypot(p1.x - p0.x, p1.z - p0.z) + Math.hypot(p2.x - p1.x, p2.z - p1.z);
+        c.turning = { p0, p1, p2, s: 0, len: Math.max(2, len), seg, dir: v.resume.dir, lane: v.resume.lane, exitT: outT, clearedUntil: outT };
+        v.slot.busy = false;
+        c.visit = null;
+        c.visitCooldown = now + 45_000 + Math.random() * 60_000;
+      }
+
       // ---- mid-turn: follow the arc around the corner ----
       if (c.turning) {
         // serve the stop/yield pause first, then pull out around the corner
@@ -256,8 +375,12 @@ export class Traffic {
           c.lane = T.lane;
           c.t = T.exitT;
           c.clearedUntil = T.clearedUntil;
-          c.speed = 3.5;
+          c.speed = c.visit ? 0 : 3.5;
           c.turning = null;
+          if (c.visit) {
+            // reset the pump timer so it starts once we're actually parked
+            c.visit.until = now + 5000 + Math.random() * 5000;
+          }
         }
         continue;
       }
@@ -280,6 +403,34 @@ export class Traffic {
       }
       if (leaderAhead < GAP) desired = 0;
       else if (leaderAhead < GAP * 2) desired = Math.min(desired, c.top * ((leaderAhead - GAP) / GAP));
+
+      // ---- a filling station ahead? maybe pull in for gas ----
+      if (!c.visit && now > c.visitCooldown && c.speed > 2) {
+        for (const st of this.stations) {
+          if (st.seg !== c.seg) continue;
+          const ahead = (st.entryT - c.t) * c.dir;
+          if (ahead < 3 || ahead > 9) continue;
+          if (Math.random() > 0.012) continue; // most drivers just pass by
+          const slot = st.slots.find((sl) => !sl.busy);
+          if (!slot) continue; // forecourt full — drive on, no stacking
+          slot.busy = true;
+          const p0 = { x: c.group.position.x, z: c.group.position.z };
+          const p2 = { x: slot.x, z: slot.z };
+          const p1 = c.seg.vertical ? { x: p2.x, z: p0.z } : { x: p0.x, z: p2.z };
+          const len = Math.hypot(p1.x - p0.x, p1.z - p0.z) + Math.hypot(p2.x - p1.x, p2.z - p1.z);
+          c.visit = {
+            station: st,
+            slot,
+            phase: "pump",
+            until: now + 5000 + Math.random() * 5000,
+            entry: st.entryT,
+            resume: { dir: c.dir, lane: c.lane },
+          };
+          c.turning = { p0, p1, p2, s: 0, len: Math.max(2, len), seg: c.seg, dir: c.dir, lane: c.lane, exitT: c.t, clearedUntil: c.clearedUntil };
+          break;
+        }
+        if (c.visit) continue;
+      }
 
       // ---- junctions, with real right-of-way ----
       // A side street terminating into a through road is a TURN, not an
@@ -335,6 +486,7 @@ export class Traffic {
               const nd = dirs[Math.floor(Math.random() * dirs.length)];
               // the box being cleared on the NEW street is the OLD street's width
               const clearance = (c.seg.w / 2) * TS + 2.1;
+              this.reserved.set(this.junctionKey(c.seg, cross), now + 4200);
               const newLane = o.w >= 4 && Math.random() < 0.45 ? 1 : 0;
               const exitT = cross.otherAt + nd * clearance;
               const oldLaneLine = centreLine(c.seg) + laneOffset(c.seg, c.dir, c.lane);
@@ -348,11 +500,13 @@ export class Traffic {
               const len =
                 Math.hypot(p1.x - p0.x, p1.z - p0.z) + Math.hypot(p2.x - p1.x, p2.z - p1.z);
               c.turning = { p0, p1, p2, s: 0, len: Math.max(2, len), seg: o, dir: nd, lane: newLane, exitT, clearedUntil: exitT };
+              this.reserved.set(this.junctionKey(c.seg, cross), now + (Math.max(2, len) / 4.2) * 1000 + STOP_MS + 600);
               c.planAt = null;
               c.speed = 0;
               continue;
             }
           }
+          this.reserved.set(this.junctionKey(c.seg, cross), now + 1800);
           c.clearedUntil = cross.at + c.dir * (stopDist + 0.5);
           c.planAt = null;
           c.speed = 0;

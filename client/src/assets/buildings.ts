@@ -679,8 +679,12 @@ export function makeBuilding(def: BuildingDef, fw: number, fd: number): THREE.Gr
       // real clearance from the storefront — cars pull between the two
       const frontZ = layout.centerZ + d / 2;
       const streetZ = fd / 2;
-      const canW = Math.min(w * 1.05, fw * 0.8);
-      const canD = Math.min(4.5, Math.max(2.6, (streetZ - frontZ) * 0.45));
+      // pumps first, canopy sized to them: a full car fits beside every pump
+      const pumps = fw >= 20 ? 4 : 3; // a fourth pump takes a genuinely wide plot
+      const pumpGap = 3.4;
+      const spread = pumpGap * (pumps - 1);
+      const canW = spread + 3.6;
+      const canD = Math.min(4.6, Math.max(3.4, (streetZ - frontZ) * 0.5));
       let midZ = frontZ + (streetZ - frontZ) * 0.56;
       midZ = Math.max(midZ, frontZ + canD / 2 + 1.15); // clear driveway, not a gulf
       midZ = Math.min(midZ, streetZ - canD / 2 - 0.4); // never spill onto the walk
@@ -709,14 +713,15 @@ export function makeBuilding(def: BuildingDef, fw: number, fd: number): THREE.Gr
       );
       stripe.position.set(0, canH - 0.26, midZ);
       g.add(stripe);
+      // columns stand on the island line just beyond the outer pumps — out
+      // of every parking spot and pull-in path, nothing drives through them
       const colMat = new THREE.MeshStandardMaterial({ color: 0xb9bcbf, roughness: 0.5 });
-      for (const sx of [-canW / 2 + 0.7, canW / 2 - 0.7]) {
+      for (const sx of [-(spread / 2 + 1.3), spread / 2 + 1.3]) {
         const col = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, canH, 8), colMat);
         col.position.set(sx, canH / 2, midZ);
         g.add(col);
       }
       // pump island: raised kerb + pump cabinets
-      const pumps = Math.max(2, Math.min(4, Math.floor(canW / 3.4)));
       const kerb = new THREE.Mesh(
         new THREE.BoxGeometry(canW * 0.8, 0.14, 1.1),
         new THREE.MeshStandardMaterial({ color: 0x9aa0a4, roughness: 0.9 })
@@ -732,7 +737,7 @@ export function makeBuilding(def: BuildingDef, fw: number, fd: number): THREE.Gr
       registerNight(screenMat, 0.7);
       const hoseMat = new THREE.MeshStandardMaterial({ color: 0x181a1c, roughness: 0.9 });
       for (let i = 0; i < pumps; i++) {
-        const px = -((pumps - 1) / 2) * 2.6 + i * 2.6;
+        const px = -((pumps - 1) / 2) * pumpGap + i * pumpGap;
         // body on a dark plinth
         const plinth = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.1, 0.5), pumpDarkMat);
         plinth.position.set(px, 0.19, midZ);

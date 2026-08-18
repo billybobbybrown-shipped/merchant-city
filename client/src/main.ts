@@ -52,6 +52,18 @@ async function boot() {
   const engine = new Engine(app);
   engine.scene.add(buildCity(map));
   const traffic = new Traffic(engine, map);
+  // gas stations get forecourt service: cars pull in for fuel. Rebuilt when
+  // lots change so player-built stations join the rotation.
+  const refreshStations = () => {
+    const list: Array<{ lot: import("@mc/shared").LotDef; def: import("@mc/shared").BuildingDef }> = [];
+    for (const lot of lots.defs.values()) {
+      const st = lots.state.get(lot.id);
+      if (st?.building && Date.now() < st.building.doneAt) continue; // still building
+      const def = buildingDefFor(lot.id);
+      if (def && def.kind === "gas_station") list.push({ lot, def: def as import("@mc/shared").BuildingDef });
+    }
+    traffic.setStations(list);
+  };
   const districtOverlay = new DistrictOverlay(map);
   engine.scene.add(districtOverlay.group);
 
@@ -357,6 +369,7 @@ async function boot() {
       unlistRent: (lotId) => room.send("unlistRent", { lotId }),
       rentLot: (lotId) => room.send("rentLot", { lotId }),
       endTenancy: (lotId) => room.send("endTenancy", { lotId }),
+      setPumpPrice: (lotId, price) => room.send("setPumpPrice", { lotId, price }),
       demolish: (lotId) => room.send("demolish", { lotId }),
       design: (lot) => {
         const st = lots.state.get(lot.id);
@@ -507,10 +520,12 @@ async function boot() {
     }, 150);
   };
   refreshTrees();
+  refreshStations();
 
   room.onMessage("lot", (row: LotState) => {
     lots.apply(row);
     refreshTrees();
+    refreshStations();
     applyCleared(row);
     constructions.sync();
     lotPanel.refresh(row);

@@ -49,6 +49,11 @@ const STOCK_META: Record<string, StockMeta> = {
     sector: "Retail",
     desc: "A no-frills grocer: buys produce wholesale off the exchange and shelves it the same day. No factory, no dividend — just turnover.",
   },
+  "Crown Petroleum": {
+    sym: "CRWN",
+    sector: "Energy",
+    desc: "The whole fuel chain under one crown: its own oil wells, a refinery turning crude into fuel, and a company gas station selling it at the pump. The city's driving public is the customer; the price board is the strategy.",
+  },
   "Nordvik Mining Systems": {
     sym: "NVK",
     sector: "Industrials",

@@ -16,6 +16,7 @@ export interface LotPanelActions {
   list(lotId: number, price: number): void;
   unlist(lotId: number): void;
   enter(lot: LotDef): void;
+  setPumpPrice(lotId: number, price: number | null): void;
   listRent(lotId: number, rent: number): void;
   unlistRent(lotId: number): void;
   rentLot(lotId: number): void;
@@ -103,6 +104,8 @@ export class LotPanel {
       ${storeys ? `<div class="lp-kv"><span>Floors</span><b>${storeys}</b></div>` : ""}
       <div class="lp-kv"><span>Assessed</span><b>${fmtMoney(lot.value)}</b></div>
       <div class="lp-kv"><span>Owner</span><b>${owner}</b></div>`;
+    if (state.pumpPrice !== null)
+      info += `<div class="lp-kv"><span>Fuel</span><b>${fmtMoney(state.pumpPrice)}/unit</b></div>`;
     if (state.tenantId)
       info += `<div class="lp-kv"><span>Tenant</span><b>${tenantMe ? "You" : state.tenantName ?? "Player"}${
         state.rent ? ` · ${fmtMoney(state.rent)}/day` : ""
@@ -195,6 +198,25 @@ export class LotPanel {
              <button class="btn-secondary lp-list">List for sale</button>
            </div>`;
       sections += `<div class="lp-section"><div class="lp-sec-title">Market</div>${market}</div>`;
+
+      // gas station: the pumps are a business of their own — stock fuel in
+      // the racks, set a price, and the driving public does the rest
+      const bdef = b ?? this.buildingDefFor(lot.id);
+      if ((bdef as { kind?: string } | null)?.kind === "gas_station" && !underConstruction) {
+        sections += `<div class="lp-section"><div class="lp-sec-title">Fuel pumps</div>
+          <div class="lp-row"><span class="lp-fuelstock">checking tanks…</span></div>
+          <div class="lp-inline">
+            <input class="lp-input lp-pumpprice" type="number" min="0.5" step="0.5" value="${state.pumpPrice ?? 20}" />
+            <button class="btn-secondary lp-setpump">${state.pumpPrice !== null ? "Reprice" : "Open pumps"}</button>
+            ${state.pumpPrice !== null ? `<button class="gd-btn lp-closepump" title="Close the pumps">✕</button>` : ""}
+          </div>
+          <div class="lp-hint">${
+            state.pumpPrice !== null
+              ? `Selling at ${fmtMoney(state.pumpPrice)}/unit. Cheaper than the market moves more fuel.`
+              : "Buy fuel on the exchange, stock it here, set a price and drivers will fill up."
+          }</div>
+        </div>`;
+      }
 
       // production site: collect yields
       if (src && !underConstruction) {
@@ -327,6 +349,19 @@ export class LotPanel {
     });
     on(".lp-demolish", () => this.actions.demolish(lot.id));
     on(".lp-collect", () => this.actions.collect(lot.id));
+    on(".lp-setpump", () => {
+      const v = Number((this.el.querySelector(".lp-pumpprice") as HTMLInputElement)?.value);
+      if (v > 0) this.actions.setPumpPrice(lot.id, Math.round(v * 100) / 100);
+    });
+    on(".lp-closepump", () => this.actions.setPumpPrice(lot.id, null));
+    const fuelEl = this.el.querySelector<HTMLElement>(".lp-fuelstock");
+    if (fuelEl)
+      fetch(`${SERVER_URL}/lotinv/${lot.id}`)
+        .then((r) => r.json())
+        .then((d) => {
+          fuelEl.textContent = `${d.items?.fuel ?? 0} fuel in the tanks`;
+        })
+        .catch(() => (fuelEl.textContent = "tanks unreadable"));
     on(".lp-openworkers", () => this.actions.openWorkers());
     // async staff list
     const jobsEl = this.el.querySelector<HTMLElement>(".lp-jobs");

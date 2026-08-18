@@ -37,6 +37,8 @@ interface SeedDef {
   // and the recipe ladder from raws to the product, in dependency order. A
   // company without one lives off the market alone.
   chain?: Chain;
+  // the storefront this company wants: e.g. petroleum runs a gas station
+  shopKind?: string;
   // the catalog a company MAY expand into — never forced: an established
   // company rolls the dice each ops day on launching one more line
   expansions?: ProductLine[];
@@ -48,6 +50,7 @@ interface SeedDef {
 // which production site grows/digs which raw — the map a board consults
 // when it decides to own the whole chain instead of buying on the exchange
 const ITEM_SOURCE: Record<string, string> = {
+  crude_oil: "oil_well",
   wheat: "farm_wheat",
   corn: "farm_corn",
   carrots: "farm_carrots",
@@ -161,6 +164,11 @@ const SEEDS: SeedDef[] = [
       { product: "flour", chain: { machines: ["rack_l"], inputs: [], ladder: [] } },
     ],
   },
+  {
+    name: "Crown Petroleum", product: "fuel", tier: "mid", dividend: 0.03,
+    shopKind: "gas_station",
+    chain: { machines: ["rack_l", "refinery"], inputs: [{ item: "crude_oil", min: 10, batch: 24 }], ladder: [["fuel", 3]] },
+  },
   { name: "Nordvik Mining Systems", product: null, tier: "mid", dividend: 0.01 },
   { name: "HashWorks Mining", product: null, tier: "large", dividend: 0 },
 ];
@@ -185,8 +193,11 @@ export class CompanyOps {
   logistics?: import("./logistics.js").LogisticsStore;
 
   async seed(): Promise<void> {
-    const existing = await pool.query("select count(*) as n from stocks");
-    if (Number(existing.rows[0].n) > 0) return;
+    // idempotent per company: a name added to SEEDS later (Crown Petroleum)
+    // gets founded into a world that already has the others
+    const have = await pool.query("select registered_name from companies where npc_operated = true");
+    const haveNames = new Set(have.rows.map((r) => r.registered_name as string));
+    if (SEEDS.every((sd) => haveNames.has(sd.name))) return;
     const savers = await pool.query(
       "select entity_id from npcs where wealth_tier in ('saver','entrepreneur') order by random() limit 60"
     );
@@ -198,6 +209,7 @@ export class CompanyOps {
     let saverIdx = 0;
 
     for (const seed of SEEDS) {
+      if (haveNames.has(seed.name)) continue;
       const founder = saverIds[saverIdx++ % saverIds.length];
       const client = await pool.connect();
       try {
@@ -739,16 +751,22 @@ export class CompanyOps {
       }
     }
     if (bizLot === null) {
-      for (const st of this.lots.all()) {
-        if (st.ownerType !== "city" || !st.forSale) continue;
-        if (st.price > balance * 0.4 || st.price < 200) continue;
-        const b = this.lots.buildingDef(st.id);
-        if (!b || b.kind === "house" || b.kind === "apartment") continue;
-        const { lot } = await this.lots.buy(companyEid, st.id);
-        const { registry } = await import("./registry.js");
-        registry.broadcast("lot", lot);
-        bizLot = st.id;
-        break;
+      // two passes: first hunt for the storefront this business WANTS
+      // (petroleum wants a gas station), then settle for any commercial lot
+      for (const wantKind of [seed.shopKind ?? null, null]) {
+        for (const st of this.lots.all()) {
+          if (st.ownerType !== "city" || !st.forSale) continue;
+          if (st.price > balance * 0.4 || st.price < 200) continue;
+          const b = this.lots.buildingDef(st.id);
+          if (!b || b.kind === "house" || b.kind === "apartment") continue;
+          if (wantKind && b.kind !== wantKind) continue;
+          const { lot } = await this.lots.buy(companyEid, st.id);
+          const { registry } = await import("./registry.js");
+          registry.broadcast("lot", lot);
+          bizLot = st.id;
+          break;
+        }
+        if (bizLot !== null) break;
       }
       if (bizLot === null) return;
     }
@@ -924,6 +942,7 @@ export class CompanyOps {
       if (limit > 0.01)
         await this.market.place(companyEid, "buy", product, 10 * scale, limit).catch(() => {});
     }
+    if (product === "fuel") return; // fuel retails at the pumps, not on shelves
     const inStore = (await this.goods.inventory("lot", String(bizLot)))[product] ?? 0;
     // a NEW listing opens at a margin over the market rate; after that the
     // shelf price belongs to the manager's sell-through repricing, so the

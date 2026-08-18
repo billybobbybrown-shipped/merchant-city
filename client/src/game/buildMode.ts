@@ -421,7 +421,11 @@ export class BuildMode {
         ${BUILD_TEMPLATES.map((t) => {
           const fits = this.lot ? templateFits(t, this.lot) : false;
           return `<button class="bm-crop bm-temp" data-id="${t.id}" ${fits ? "" : "disabled"}
-            title="${fits ? `$${t.cost.toLocaleString()} · ${t.floors} floor${t.floors > 1 ? "s" : ""} · ${t.buildMinutes} min` : "This lot is too small"}">
+            title="${
+              fits
+                ? `$${t.cost.toLocaleString()} · ${t.floors} floor${t.floors > 1 ? "s" : ""} · ${t.buildMinutes} min · needs ${t.minW * 2}×${t.minD * 2} m`
+                : `Too small — needs a ${t.minW * 2}×${t.minD * 2} m lot (this one is ${(this.lot?.w ?? 0) * 2}×${(this.lot?.h ?? 0) * 2} m)`
+            }">
             ${ic(`kind_${t.kind}`, 15)}<span>${t.label}</span></button>`;
         }).join("")}
       </div>

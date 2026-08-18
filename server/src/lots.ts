@@ -68,7 +68,7 @@ export class LotStore {
     const rows = await pool.query(
       `select l.id, l.name, l.sign, l.for_sale, l.price, l.value, l.for_rent, l.rent,
               l.owner_entity_id, l.tenant_entity_id,
-              l.missed_payments, l.cleared, l.source_type, l.source_area, l.source_shape, l.source_extracted,
+              l.missed_payments, l.cleared, l.pump_price, l.source_type, l.source_area, l.source_shape, l.source_extracted,
               extract(epoch from l.source_done_at) * 1000 as source_ms,
               oe.kind as owner_kind, oe.name as owner_name, te.name as tenant_name,
               b.template, b.kind, b.floors, b.seed, b.name as bname, b.shape,
@@ -101,6 +101,7 @@ export class LotStore {
         tenantId: r.tenant_entity_id !== null ? String(r.tenant_entity_id) : null,
         tenantName: r.tenant_name ?? null,
         cleared: r.cleared,
+        pumpPrice: r.pump_price !== null ? Number(r.pump_price) : null,
         source: r.source_type
           ? {
               type: r.source_type,
@@ -324,6 +325,23 @@ export class LotStore {
   // Build a PRESET building — the same procedural kinds the city generates
   // (house, shop, tower, gas station...), placed whole on a clear lot for a
   // flat cash price. Custom drawing stays its own path.
+  // Open (or reprice, or close) a gas station's pumps. The pumps sell the
+  // property's fuel stock at this price; null shuts them.
+  async setPumpPrice(eid: number, lotId: number, price: number | null): Promise<LotState> {
+    const st = this.state.get(lotId);
+    if (!st) throw new EconomyError("no such lot");
+    if (this.operatorOf(lotId) !== eid && !this.ownsLot(eid, lotId))
+      throw new EconomyError("you don't run this lot");
+    if (this.buildingDef(lotId)?.kind !== "gas_station")
+      throw new EconomyError("no fuel pumps on this lot");
+    if (price !== null && !(price > 0 && price < 10_000)) throw new EconomyError("bad price");
+    await pool.query("update lots set pump_price = $3 where world_id = $1 and id = $2", [
+      WORLD_ID, lotId, price,
+    ]);
+    st.pumpPrice = price;
+    return st;
+  }
+
   async buildTemplate(
     eid: number,
     lotId: number,

@@ -12,6 +12,7 @@ import {
   scoreOffer,
   wageAcceptable,
   TILE_WORLD_SIZE as TS,
+  buildingLayout,
 } from "@mc/shared";
 import { pool } from "./db.js";
 import {
@@ -521,6 +522,10 @@ export class NpcSim {
       const a = rack ? beside(rack, "pickup") : null;
       const b = shelf ? beside(shelf, "restock") : null;
       n.work = [a, b].filter(Boolean) as typeof n.work;
+      // at a gas station the round also runs OUTSIDE: carry fuel from the
+      // racks out to the pump island and top the pumps up
+      const pump = this.pumpIslandSpot(lotId);
+      if (pump) n.work.push({ ...pump, act: "fillpump" });
       if (!n.work.length) n.work = [centre];
       return;
     }
@@ -804,6 +809,33 @@ export class NpcSim {
     return out;
   }
 
+  // The pump island's world position on a gas-station lot, from the same
+  // shared layout the client renders — null on any other kind of lot.
+  private pumpIslandSpot(lotId: number): { x: number; y: number } | null {
+    const def = this.lots.buildingDef(lotId);
+    if (def?.kind !== "gas_station") return null;
+    const lot = this.lots.lotDef(lotId);
+    if (!lot) return null;
+    const sideways = lot.facing >= 2;
+    const fw = (sideways ? lot.h : lot.w) * TS;
+    const fd = (sideways ? lot.w : lot.h) * TS;
+    const layout = buildingLayout(def, fw, fd);
+    const frontZ = layout.centerZ + layout.d / 2;
+    const streetZ = fd / 2;
+    const canD = Math.min(4.6, Math.max(3.4, (streetZ - frontZ) * 0.5));
+    let midZ = frontZ + (streetZ - frontZ) * 0.56;
+    midZ = Math.max(midZ, frontZ + canD / 2 + 1.15);
+    midZ = Math.min(midZ, streetZ - canD / 2 - 0.4);
+    const rot = [0, Math.PI, Math.PI / 2, -Math.PI / 2][lot.facing] ?? 0;
+    const cx = (lot.x + lot.w / 2) * TS;
+    const cz = (lot.y + lot.h / 2) * TS;
+    // stand just off the island, between the pumps
+    return {
+      x: cx + 0.9 * Math.cos(rot) + midZ * Math.sin(rot),
+      y: cz - 0.9 * Math.sin(rot) + midZ * Math.cos(rot),
+    };
+  }
+
   // arriving somewhere is what makes the work happen
   private async onWorkArrival(n: Npc, act: string): Promise<void> {
     if (!this.goods || n.employerLot === null) return;
@@ -852,6 +884,19 @@ export class NpcSim {
       }
       n.carrying = null;
       this.setStatus(n, "");
+    }
+    if (act === "fillpump") {
+      const st = this.lots.get(lotId);
+      const fuel = (await this.goods.inventory("lot", String(lotId))).fuel ?? 0;
+      if (st?.pumpPrice === null || st?.pumpPrice === undefined) {
+        this.setStatus(n, "pumps closed");
+      } else if (fuel <= 0) {
+        this.setStatus(n, "no fuel for the pumps");
+      } else {
+        this.setStatus(n, "");
+      }
+      n.workPause = Date.now() + 6000; // topping up takes a moment
+      return;
     }
     if (act === "craft") {
       // standing at the machine with an empty queue helps nobody — say so
@@ -1505,6 +1550,84 @@ export class NpcSim {
     }
   }
 
+  // Fuel retail: stations with open pumps and fuel in the tanks sell to the
+  // driving public each game day. Demand follows price — cheap pumps move
+  // more gallons — and every sale is a real citizen paying a real owner.
+  private async runFuelSales() {
+    if (!this.goods || !this.market) return;
+    for (const st of this.lots.all()) {
+      if (st.pumpPrice === null || st.pumpPrice <= 0) continue;
+      if (this.lots.buildingDef(st.id)?.kind !== "gas_station") continue;
+      const ownerEid = st.ownerType === "city" ? null : Number(st.ownerId);
+      if (ownerEid === null) continue;
+      const stock = (await this.goods.inventory("lot", String(st.id))).fuel ?? 0;
+      if (stock <= 0) continue;
+      const ref = await this.market.refPrice("fuel");
+      const rel = st.pumpPrice / Math.max(0.5, ref);
+      if (rel > 3) continue; // nobody pays triple the going rate
+      // 2-9 fill-ups a day depending on how sharp the price is
+      const fills = Math.min(stock, Math.max(1, Math.round((2 + Math.random() * 3) * Math.min(2.2, 2.2 - rel + 0.6))));
+      let sold = 0;
+      for (let i = 0; i < fills; i++) {
+        const buyer = await pool.query(
+          `select n.entity_id from npcs n join accounts a on a.entity_id = n.entity_id and a.currency = 'clean'
+            where a.balance > $1 order by random() limit 1`,
+          [st.pumpPrice * 2]
+        );
+        if (!buyer.rowCount) break;
+        const qty = 1 + Math.floor(Math.random() * 2);
+        const take = Math.min(qty, stock - sold);
+        if (take <= 0) break;
+        if (!(await this.goods.takeFromProperty(st.id, "fuel", take))) break;
+        const client = await pool.connect();
+        try {
+          await client.query("begin");
+          await transfer(client, Number(buyer.rows[0].entity_id), ownerEid,
+            Math.round(st.pumpPrice * take * 100) / 100, "retail_sale", `fuel @ lot ${st.id}`);
+          await client.query("commit");
+          sold += take;
+        } catch {
+          await client.query("rollback");
+          await this.goods.putIntoProperty(st.id, "fuel", take);
+        } finally {
+          client.release();
+        }
+      }
+    }
+  }
+
+  // Managers also run the PUMPS at gas stations: open them at a margin over
+  // the market rate when fuel is stocked, then reprice by sell-through the
+  // same way shelves work. Applies to any managed station — player or NPC.
+  private async runPumpPricing() {
+    if (!this.goods || !this.market) return;
+    for (const st of this.lots.all()) {
+      if (this.lots.buildingDef(st.id)?.kind !== "gas_station") continue;
+      if (!this.isStaffed(st.id, "manager")) continue;
+      const fuel = (await this.goods.inventory("lot", String(st.id))).fuel ?? 0;
+      if (st.pumpPrice === null || st.pumpPrice === undefined) {
+        if (fuel <= 0) continue;
+        const open = Math.round((await this.market.refPrice("fuel")) * 1.3 * 100) / 100;
+        await pool.query("update lots set pump_price = $3 where world_id = $1 and id = $2", [WORLD_ID, st.id, open]);
+        st.pumpPrice = open;
+        continue;
+      }
+      const sold = await pool.query(
+        `select count(*) as n from ledger where category = 'retail_sale' and reason = $1
+          and ts > now() - interval '10 minutes'`,
+        [`fuel @ lot ${st.id}`]
+      );
+      let px = st.pumpPrice;
+      if (Number(sold.rows[0].n) > 0 && fuel < 6) px *= 1.05;
+      else if (Number(sold.rows[0].n) === 0 && fuel > 0) px *= 0.96;
+      else continue;
+      px = Math.max(1, Math.round(px * 100) / 100);
+      if (px === st.pumpPrice) continue;
+      await pool.query("update lots set pump_price = $3 where world_id = $1 and id = $2", [WORLD_ID, st.id, px]);
+      st.pumpPrice = px;
+    }
+  }
+
   // crafters keep machines running toward whatever the shop has priced
   private async runCrafters() {
     if (!this.goods) return;
@@ -1667,6 +1790,8 @@ export class NpcSim {
     await this.runJobHunt();
     await this.runCrafters();
     await this.runManagerPricing();
+    await this.runPumpPricing();
+    await this.runFuelSales();
     await this.runEntrepreneurs();
     await this.runHousingUpgrades();
     for (const n of this.npcs.values()) {
