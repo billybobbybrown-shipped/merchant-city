@@ -66,8 +66,8 @@ export function buildingForLot(citySeed: number, lot: LotDef): BuildingDef | nul
     ["office", 0.14],
     ["warehouse", 0.12],
     ["factory", area >= 24 ? 0.08 : 0],
-    // a forecourt needs room — corner-store plots don't get pumps
-    ["gas_station", area >= 30 ? 0.05 : 0],
+    // gas stations never auto-spawn: they exist only when a player or the
+    // petroleum company builds one
   ];
   let total = 0;
   for (const [, wgt] of weights) total += wgt;

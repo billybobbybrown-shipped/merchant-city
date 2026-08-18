@@ -368,6 +368,8 @@ export class LotStore {
       await client.query("begin");
       const bal = await transfer(client, eid, CITY_ENTITY, t.cost, "construction", `build ${t.label} on lot ${lotId}`);
       cash.set(eid, bal.from);
+      // owner_id is the players link — null for company builders, whose
+      // ownership lives on the lot itself
       await client.query(
         `insert into buildings (world_id, lot_id, owner_id, template, kind, floors, seed, name, done_at, shape)
          values ($1, $2, (select id from players where entity_id = $3), $4, $5, $6, $7, $8, to_timestamp($9 / 1000.0), null)`,

@@ -584,10 +584,24 @@ export class CompanyOps {
     if (!srcType || !this.logistics) return;
     const wage = await this.workforce.marketWage();
 
-    // already integrated? keep it staffed and routed, then done
+    // already integrated? keep it staffed and routed — and if the fields
+    // don't yet work the whole plot, plough the rest (expansion pays only
+    // for the newly covered ground)
     for (const st of this.lots.all()) {
       if (st.ownerType === "city" || st.ownerId !== String(companyEid)) continue;
       if (st.source?.type !== srcType) continue;
+      const lotDef = this.lots.lotDef(st.id);
+      if (lotDef) {
+        const mainH = Math.max(2, lotDef.h - 1);
+        const wantArea = lotDef.w * mainH + (lotDef.w > 3 ? lotDef.w - 3 : 0);
+        if ((st.source.area ?? 0) < wantArea)
+          await this.lots
+            .setupSource(companyEid, st.id, srcType, [
+              { x: 0, y: 0, w: lotDef.w, h: mainH },
+              ...(lotDef.w > 3 ? [{ x: 3, y: mainH, w: lotDef.w - 3, h: 1 }] : []),
+            ])
+            .catch(() => {});
+      }
       const role = st.source.type.startsWith("quarry") || st.source.type === "oil_well" ? "miner" : "farmer";
       await this.workforce.ensureStaffed(companyEid, st.id, role, wage + 2, 2).catch(() => {});
       await this.workforce.ensureStaffed(companyEid, null, "hauler", wage + 6).catch(() => {});
@@ -605,12 +619,23 @@ export class CompanyOps {
       if (area < 24 || area > 140 || st.price > balance * 0.15) continue;
       try {
         await this.lots.buy(companyEid, st.id);
-        // the field covers the plot except a strip for the loading pad
+        // the field works ALL the land except a three-cell pocket in the
+        // bottom-left where the loading pad sits
         await this.lots.setupSource(companyEid, st.id, srcType, [
-          { x: 0, y: 0, w: lot.w, h: Math.max(2, lot.h - 2) },
+          { x: 0, y: 0, w: lot.w, h: Math.max(2, lot.h - 1) },
+          ...(lot.w > 3 ? [{ x: 3, y: Math.max(2, lot.h - 1), w: lot.w - 3, h: 1 }] : []),
         ]);
         await this.logistics.build(companyEid, st.id, 1, lot.h - 1).catch(() => {});
-        await this.logistics.build(companyEid, bizLot, 0, 0).catch(() => {});
+        const biz = this.lots.lotDef(bizLot);
+        const dockCell = biz
+          ? [
+              { x: 0, y: biz.h - 1 },
+              { x: biz.w - 1, y: 0 },
+              { x: biz.w - 1, y: biz.h - 1 },
+              { x: 0, y: 0 },
+            ][biz.facing] ?? { x: 0, y: 0 }
+          : { x: 0, y: 0 };
+        await this.logistics.build(companyEid, bizLot, dockCell.x, dockCell.y).catch(() => {});
         await this.logistics.addLine(companyEid, st.id, "out", item, 40, bizLot).catch(() => {});
         const role = srcType.startsWith("quarry") || srcType === "oil_well" ? "miner" : "farmer";
         await this.workforce.ensureStaffed(companyEid, st.id, role, wage + 2, 2).catch(() => {});
@@ -753,7 +778,7 @@ export class CompanyOps {
     if (bizLot === null) {
       // two passes: first hunt for the storefront this business WANTS
       // (petroleum wants a gas station), then settle for any commercial lot
-      for (const wantKind of [seed.shopKind ?? null, null]) {
+      const buyPass = async (wantKind: string | null): Promise<number | null> => {
         for (const st of this.lots.all()) {
           if (st.ownerType !== "city" || !st.forSale) continue;
           if (st.price > balance * 0.4 || st.price < 200) continue;
@@ -763,12 +788,55 @@ export class CompanyOps {
           const { lot } = await this.lots.buy(companyEid, st.id);
           const { registry } = await import("./registry.js");
           registry.broadcast("lot", lot);
-          bizLot = st.id;
-          break;
+          return st.id;
         }
-        if (bizLot !== null) break;
+        return null;
+      };
+      // priority for a business with a storefront KIND: an existing building
+      // of that kind, else BUILD one on vacant ground, else any commercial
+      if (seed.shopKind) bizLot = await buyPass(seed.shopKind);
+      if (bizLot === null && seed.shopKind) {
+        const { templateById, templateFits } = await import("@mc/shared");
+        const t = templateById(seed.shopKind);
+        if (t) {
+          for (const st of this.lots.all()) {
+            if (st.ownerType !== "city" || !st.forSale) continue;
+            if (st.price > balance * 0.3) continue;
+            const lot = this.lots.lotDef(st.id);
+            if (!lot || !templateFits(t, lot)) continue;
+            if (this.lots.buildingDef(st.id) !== null || st.source) continue; // vacant only
+            try {
+              await this.lots.buy(companyEid, st.id);
+              await this.lots.buildTemplate(companyEid, st.id, t.id);
+              const { registry } = await import("./registry.js");
+              registry.broadcast("lot", this.lots.all().find((l) => l.id === st.id));
+              console.log(`[companyOps] ${seed.name} breaks ground on a ${t.label.toLowerCase()} (lot ${st.id})`);
+              bizLot = st.id;
+              break;
+            } catch {
+              /* lot didn't work out — try the next */
+            }
+          }
+        }
       }
+      if (bizLot === null) bizLot = await buyPass(null);
       if (bizLot === null) return;
+    }
+
+    // the right storefront on its own ground: if the lot is clear and this
+    // business wants a specific building (Crown -> gas station), build it
+    if (seed.shopKind) {
+      const cur = this.lots.buildingDef(bizLot);
+      const bizState = this.lots.all().find((l) => l.id === bizLot);
+      if (cur && cur.kind !== seed.shopKind && !bizState?.building) {
+        // wrong storefront inherited with the land: knock it down
+        await this.lots.demolish(companyEid, bizLot).catch(() => {});
+      }
+      if (!this.lots.buildingDef(bizLot)) {
+        await this.lots.buildTemplate(companyEid, bizLot, seed.shopKind).then(() => {
+          console.log(`[companyOps] ${seed.name} builds its ${seed.shopKind} on lot ${bizLot}`);
+        }).catch(() => {});
+      }
     }
 
     // shelf, cashier
