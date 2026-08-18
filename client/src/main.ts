@@ -6,7 +6,8 @@ import { runAuthFlow } from "./ui/auth.js";
 import { HUD } from "./ui/hud.js";
 import { watchSelects } from "./ui/dropdown.js";
 import { Engine } from "./render/engine.js";
-import { buildCity, derivedBuildings, restyleDerived } from "./game/city.js";
+import { buildCity, derivedBuildings, restyleDerived, updateTrees } from "./game/city.js";
+import { Traffic } from "./game/traffic.js";
 import * as THREE from "three";
 import { PlayerRenderer } from "./game/players.js";
 import { CharacterPanel } from "./ui/characterPanel.js";
@@ -50,6 +51,7 @@ async function boot() {
   const map = await fetchMap();
   const engine = new Engine(app);
   engine.scene.add(buildCity(map));
+  const traffic = new Traffic(engine, map);
   const districtOverlay = new DistrictOverlay(map);
   engine.scene.add(districtOverlay.group);
 
@@ -487,8 +489,28 @@ async function boot() {
     toast(ui, `${m.category} permit issued — ${m.fee ? `$${m.fee}` : ""}`);
     if (companyPanel.visible) void companyPanel.refresh();
   });
+  // claimed ground carries no wild trees: rebuild the tree layer whenever
+  // ownership changes (cheap — one instanced rebuild, debounced)
+  let treeTimer: ReturnType<typeof setTimeout> | null = null;
+  const refreshTrees = () => {
+    if (treeTimer) clearTimeout(treeTimer);
+    treeTimer = setTimeout(() => {
+      const blockedTiles = new Set<number>();
+      for (const [id, st] of lots.state) {
+        if (st.ownerType === "city") continue;
+        const lot = lots.defs.get(id);
+        if (!lot) continue;
+        for (let y = lot.y; y < lot.y + lot.h; y++)
+          for (let x = lot.x; x < lot.x + lot.w; x++) blockedTiles.add(y * map.width + x);
+      }
+      updateTrees((x, y) => blockedTiles.has(y * map.width + x));
+    }, 150);
+  };
+  refreshTrees();
+
   room.onMessage("lot", (row: LotState) => {
     lots.apply(row);
+    refreshTrees();
     applyCleared(row);
     constructions.sync();
     lotPanel.refresh(row);
@@ -666,6 +688,7 @@ async function boot() {
 
   let tickAcc = 0;
   engine.onFrame((dt) => {
+    traffic.update(dt);
     districtOverlay.update(engine.camera);
     // whoever's inside the open interior stands on its floor slab, not the
     // world ground 12cm below it

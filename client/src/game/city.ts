@@ -33,6 +33,41 @@ function placeDerived(lot: LotDef, b: THREE.Object3D): void {
 
 // Re-render one pre-existing building with the owner's name on the sign, or
 // with no sign at all. Returns false if this lot has no derived building.
+// Deterministic tree scatter over grass. The rng stream ALWAYS runs the same
+// draws per tile, so skipping claimed ground never reshuffles the rest —
+// buying a parcel fells its trees and moves nothing else.
+function scatterTrees(map: CityMap, blocked: (x: number, y: number) => boolean): THREE.Group {
+  const rng = mulberry32(hashSeed(map.seed, 0x960));
+  const bySpecies: Placement[][] = Array.from({ length: TREE_SPECIES }, () => []);
+  const tile = (x: number, y: number) => map.tiles[y * map.width + x];
+  for (let y = 0; y < map.height; y++)
+    for (let x = 0; x < map.width; x++) {
+      const t = tile(x, y);
+      if (t === Tile.Grass && chance(rng, 0.10)) {
+        const place = {
+          x: (x + 0.5 + (rng() - 0.5) * 0.6) * TS,
+          z: (y + 0.5 + (rng() - 0.5) * 0.6) * TS,
+          rot: rng() * Math.PI * 2,
+          scale: 0.8 + rng() * 0.55,
+        };
+        const sp = rint(rng, 0, TREE_SPECIES - 1);
+        if (!blocked(x, y)) bySpecies[sp].push(place);
+      }
+    }
+  const g = makeTrees(bySpecies);
+  g.name = "trees";
+  return g;
+}
+
+// Rebuild the tree layer, felling everything on claimed parcels — called
+// whenever lot ownership changes hands.
+export function updateTrees(blocked: (x: number, y: number) => boolean): void {
+  if (!cityRoot || !cityMap) return;
+  const old = cityRoot.getObjectByName("trees");
+  if (old) cityRoot.remove(old);
+  cityRoot.add(scatterTrees(cityMap, blocked));
+}
+
 export function restyleDerived(lotId: number, name: string | null, sign: boolean): boolean {
   const lot = cityMap?.lots.find((l) => l.id === lotId);
   if (!cityRoot || !cityMap || !lot) return false;
@@ -104,26 +139,13 @@ export function buildCity(map: CityMap): THREE.Group {
   console.log(`[city] ${buildingCount} buildings, ${map.lots.length} lots`);
 
   // ---- trees ------------------------------------------------------------
-  const rng = mulberry32(hashSeed(map.seed, 0x960));
-  const bySpecies: Placement[][] = Array.from({ length: TREE_SPECIES }, () => []);
-  for (let y = 0; y < map.height; y++)
-    for (let x = 0; x < map.width; x++) {
-      const t = tile(x, y);
-      if (t === Tile.Grass && chance(rng, 0.10)) {
-        bySpecies[rint(rng, 0, TREE_SPECIES - 1)].push({
-          x: (x + 0.5 + (rng() - 0.5) * 0.6) * TS,
-          z: (y + 0.5 + (rng() - 0.5) * 0.6) * TS,
-          rot: rng() * Math.PI * 2,
-          scale: 0.8 + rng() * 0.55,
-        });
-      }
-    }
-  root.add(makeTrees(bySpecies));
+  root.add(scatterTrees(map, () => false));
 
   // ---- streetlights ------------------------------------------------------
   // streetlights removed per owner preference — night is lit by building windows
 
   // ---- hydrants ------------------------------------------------------------
+  const rng = mulberry32(hashSeed(map.seed, 0x9d1));
   const hydrantPlaces: Placement[] = [];
   for (const b of map.blocks) {
     if (chance(rng, 0.3)) {
